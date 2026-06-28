@@ -38,4 +38,4 @@ config.yml
 !config.yml.sample
 
 # --- Wazuh dev stack: generated TLS certs (regenerate locally, never commit) ---
-dev/wazuh-single-node/config/wazuh_indexer_ssl_certs/
+dev/wazuh-single-node/config/certs/

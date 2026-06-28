@@ -17,6 +17,19 @@ See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) an
 - `main` — release-only, stable.
 - `develop` — default integration branch; feature branches open PRs here.
 
+## Local development
+
+A single-node Wazuh stack (manager + indexer + dashboard) for local testing lives under
+[`dev/`](dev/). From the repo root:
+
+```bash
+make dev-init   # one-time: TLS cert + /etc/hosts + trust CA (sudo)
+make dev-up     # start, with Traefik domain access
+make help       # list all dev targets
+```
+
+See [dev/README.md](dev/README.md) for the full guide (domains, ports, reset, etc.).
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).

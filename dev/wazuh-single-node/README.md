@@ -1,5 +1,9 @@
 # Deploy Wazuh Docker in single node configuration
 
+> **Note:** This is the upstream `wazuh-docker` single-node README, kept for reference. For the
+> whisper-wazuh dev stack (Traefik domains, consolidated `config/certs/` layout, `make` targets),
+> see [../README.md](../README.md).
+
 This deployment is defined in the `docker-compose.yml` file with one Wazuh manager containers, one Wazuh indexer containers, and one Wazuh dashboard container. It can be deployed by following these steps: 
 
 1) Increase max_map_count on your host (Linux). This command must be run with root permissions:
