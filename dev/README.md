@@ -16,7 +16,7 @@ compose file). This pins our target Wazuh version — see issue #4.
   cert mounts repointed to `config/certs/`.
 - `generate-indexer-certs.yml` — certs are generated into `config/certs/`.
 - Added (not upstream): `docker-compose.traefik.yml`, `config/traefik/`, `scripts/dev-init.sh`,
-  and a repo-root `Makefile`.
+  `docker-compose.agent.yml`, `config/wazuh_agent/`, and a repo-root `Makefile`.
 
 All TLS material — the Wazuh cluster certs **and** the Traefik `*.whisper-wazuh-dev.localhost`
 wildcard — lives under `config/certs/` and is gitignored.
@@ -124,3 +124,30 @@ make dev-down   # stop (keep data)   |   make dev-reset = wipe volumes
 ```
 
 `make dev-up-basic` starts the stack without Traefik (localhost ports only).
+
+## Agent (test data)
+
+The base stack has no agents, so little flows in. Add one enrolled agent to generate **real
+alerts** (file-integrity, config-assessment, and on-demand IOC events) to explore and to test
+the connector against:
+
+```bash
+make dev-agent-up      # enroll a `dev-agent` with the manager (passwordless authd)
+make dev-agent-demo    # inject a sample SSH brute-force -> rule 5710 with data.srcip=203.0.113.45
+make dev-agent-logs    # follow the agent
+make dev-agent-down    # remove the agent
+```
+
+`dev-agent-demo` appends a line to `/var/log/wazuh-demo.log` inside the agent (monitored via
+`config/wazuh_agent/ossec.conf`). On the **first** run after `dev-agent-up`, give the log
+collector ~1 min to pick up the new file; it's immediate after that. Watch alerts land in the
+dashboard (*Security events*) or query the indexer:
+
+```bash
+curl -sk -u admin:SecretPassword "https://localhost:9200/wazuh-alerts-*/_search" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"query_string":{"query":"203.0.113.45"}},"size":1}'
+```
+
+The agent is containerized, so it monitors the container (not your host) — fine for generating
+alerts and connector test data.

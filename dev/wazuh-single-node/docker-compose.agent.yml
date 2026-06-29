@@ -1,0 +1,16 @@
+# Wazuh agent overlay — adds one enrolled agent to the single-node dev stack so
+# real alerts flow into the indexer/dashboard. Optional; use alongside the base:
+#   docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d wazuh.agent
+# (or `make dev-agent-up`). Pinned to the manager's version.
+
+services:
+  wazuh.agent:
+    image: wazuh/wazuh-agent:4.14.5
+    hostname: wazuh.agent
+    restart: always
+    depends_on:
+      - wazuh.manager
+    environment:
+      - WAZUH_MANAGER_SERVER=wazuh.manager
+    volumes:
+      - ./config/wazuh_agent/ossec.conf:/wazuh-config-mount/etc/ossec.conf
