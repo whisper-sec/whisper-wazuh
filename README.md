@@ -23,12 +23,13 @@ A single-node Wazuh stack (manager + indexer + dashboard) for local testing live
 [`dev/`](dev/). From the repo root:
 
 ```bash
-make dev-init   # one-time: TLS cert + /etc/hosts + trust CA (sudo)
-make dev-up     # start, with Traefik domain access
-make help       # list all dev targets
+make dev-init      # one-time: TLS cert + /etc/hosts + trust CA (sudo)
+make dev-up        # start, with Traefik domain access
+make dev-agent-up  # add an agent that generates real test alerts
+make help          # list all dev targets
 ```
 
-See [dev/README.md](dev/README.md) for the full guide (domains, ports, reset, etc.).
+See [dev/README.md](dev/README.md) for the full guide (domains, ports, agent/test data, reset).
 
 ## License
 
