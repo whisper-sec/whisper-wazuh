@@ -1,0 +1,22 @@
+# Traefik static configuration — whisper-wazuh local dev reverse proxy.
+# Routes the three Wazuh services by hostname over a single :443 entrypoint,
+# terminating TLS with a cert signed by the Wazuh root CA (see scripts/dev-init.sh).
+
+entryPoints:
+  websecure:
+    address: ":443"
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+# Traefik's own dashboard, bound to localhost only via the compose port mapping.
+api:
+  dashboard: true
+  insecure: true
+
+log:
+  level: INFO
+
+accessLog: {}
