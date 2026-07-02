@@ -33,11 +33,11 @@ into Wazuh as a *new* alert the analyst sees next to the original.
   │ data.srcip: 185.220.101.1     │                  │ + targeted lookups  │
   └───────────────┬───────────────┘                  └──────────▲──────────┘
                   │ matches the <integration> filter            │
-                  ▼                                             │ ② look up
+                  ▼                                             │ ③ look up
         wazuh-integratord ──runs──► custom-whisper script ──────┘
                                         │  ① extract the IOC (data.srcip)
-                                        │  ③ build the data.whisper.* JSON
-                                        │  ④ dedup check — skip if seen < TTL
+                                        │  ② dedup check — if seen < TTL, stop here
+                                        │  ④ build the data.whisper.* JSON
                                         ▼  ⑤ send one datagram
                         /var/ossec/queue/sockets/queue  (analysisd)
                                         │
@@ -173,12 +173,21 @@ Verified against `virustotal.py` / `maltiverse.py` @ v4.14.5:
   budget the *entire framed string* under ~64 KB, and keep the JSON well under 60 KB, falling back
   to `payload_too_large` (§8) when a full payload would overflow.
 
-- **Script contract:** `integratord` executes `/var/ossec/integrations/custom-whisper` with
-  positional args `argv[1]` = path to a temp JSON file holding the single triggering alert,
-  `argv[2]` = API key, `argv[3]` = hook URL (from `<hook_url>`; the custom-whisper script ignores
-  it as `virustotal.py` does — it must **not** validate the URL — and still tolerates the standard
-  invocation, exiting cleanly if fewer than 4 args arrive), `argv[4]` = optional `debug`. Scripts
-  live in `/var/ossec/integrations/`, perms `750`, owner `root:wazuh`.
+- **Script contract** (verified empirically on 4.14.5): `integratord` executes
+  `/var/ossec/integrations/custom-whisper` with positional args —
+  `argv[1]` = path to a temp JSON file holding the single triggering alert (one line; requires
+  `<alert_format>json</alert_format>`; unlinked after the script exits) ·
+  `argv[2]` = API key (`''` when unset) ·
+  `argv[3]` = hook URL (from `<hook_url>`; the script ignores it as `virustotal.py` does — it must
+  **not** validate the URL) ·
+  `argv[4]` = `debug` or `''` ·
+  `argv[5]` = options tmp file (JSON from `<options>`, `''` when unset) ·
+  `argv[6]` = timeout (default `10`) · `argv[7]` = retries (default `3`) ·
+  plus a literal trailing `> /dev/null 2>&1` argument when debug is off — **read args
+  positionally, never rely on `argc`.** The `<options>` JSON (argv[5]) is the config channel for
+  `api_url` and `dedup_ttl`; resolution order: options → environment (`WHISPER_API_URL` /
+  `WHISPER_DEDUP_TTL`) → built-in default. Scripts live in `/var/ossec/integrations/`, perms
+  `750`, owner `root:wazuh`.
 
 ### 2.4 How `data.whisper.*` lands in the indexer
 
@@ -255,8 +264,9 @@ integrations (`{'integration': '<name>', '<name>': {…}}`):
       "field_path": "data.srcip",
       "original_full_log": "…first 512 chars of the source alert's full_log…"
     },
-    "asn": { "number": 0, "name": "" },
-    "geo": { "country": "DE", "city": "Berlin, DE" },
+    "asn": { "number": 60729, "name": null },
+    "prefix": "185.220.101.0/24",
+    "geo": { "country": "DE", "city": null },
     "threat_feed": {
       "feeds": ["dan-tor-exit", "stamparm-ipsum", "tor-exit-nodes", "stopforumspam-listed-ip-7d"],
       "categories": ["TOR Network", "General Blacklists"],
@@ -450,7 +460,7 @@ IPv6 has **no `HAS_COUNTRY` edge** — its country comes via `LOCATED_IN → CIT
 | feed `CATEGORY` names (best-effort) | `threat_feed.categories[]` | keyword[] | Via `LISTED_IN → BELONGS_TO → CATEGORY` where materialised; needs a static `feedId → category` map for feeds the graph doesn't categorise (§11). |
 | normalised from flags + categories | `tags[]` | keyword[] | Lowercased convenience tags (`tor`, `c2`, `phishing`, …) derived from `flags[]`/`categories[]`. |
 | `(ip)-[:BELONGS_TO]->(:PREFIX)<-[:ROUTES]-(:ASN)`; `asn.name` → int after `AS` | `asn.number` | integer | **No direct IP→ASN edge.** `ROUTES` is directed `ASN→PREFIX`. `asn.name` e.g. `AS15169` → `15169`. |
-| `(asn)-[:HAS_NAME]->(:ASN_NAME).name` | `asn.name` | keyword | Human label, e.g. `GOOGLE - Google LLC`. (Not `ASN.name`, which is the number; not `REGISTERED_BY`.) |
+| `(asn)-[:HAS_NAME]->(:ASN_NAME).name` | `asn.name` | keyword | Human label, e.g. `GOOGLE - Google LLC`. (Not `ASN.name`, which is the number; not `REGISTERED_BY`.) May be **absent** — some ASNs have no `HAS_NAME` edge (verified: AS60729). |
 | `(ip)-[:HAS_COUNTRY]->(:COUNTRY).name` (IPv4) / `(ip)-[:LOCATED_IN]->(:CITY)` (IPv6) | `geo.country` | keyword | ISO country code. Best-effort — anycast IPs report the operator HQ, not the edge (§11). |
 | `(ip)-[:LOCATED_IN]->(:CITY).name` | `geo.city` | keyword | e.g. `Mountain View, US`. Absent for anycast. |
 | `(ip)-[:BELONGS_TO]->(:PREFIX).name` | `prefix` | keyword | RIR/announced prefix (CIDR). |
@@ -625,17 +635,20 @@ duplicate; dedup keys on IOC identity (`dedup_key`, below).
    include it for per-endpoint dedup (the same IOC on two hosts = two analyst-relevant events);
    drop it for org-wide dedup. (Compare: opencti keys SCO IDs off value(+type); the Whisper
    Splunk add-on caches keyed by `indicator + type`, TTL 3600 s.)
-3. **Check before emit.** On each triggering alert, compute `dedup_key`; if it is present and
-   unexpired in the cache, **skip the socket send entirely**. Otherwise emit and record the key
-   with a timestamp. This directly satisfies issue #1 AC #8: *"re-running within the dedup TTL
-   produces no duplicate enrichment alerts."*
+3. **Check first — before the Whisper lookup.** On each triggering alert, compute `dedup_key`;
+   if it is present and unexpired in the cache, **skip the enrichment entirely — no Whisper API
+   call, no socket send** (saves API budget and makes the skip observable as a single log line).
+   Otherwise enrich, emit, and record the key with a timestamp. This directly satisfies issue #1
+   AC #8: *"re-running within the dedup TTL produces no duplicate enrichment alerts."*
 4. **TTL:** default 3600 s (Splunk-add-on parity). After expiry a fresh enrichment alert is
    allowed — intentional re-surfacing of still-relevant context.
 5. **Persistent cache — required.** `integratord` **spawns the script per matching alert**, so an
    in-process dict does **not** persist between alerts and would never dedup. The cache **must** be
-   cross-invocation: a small file / SQLite / on-disk KV under `/var/ossec` (e.g.
-   `/var/ossec/var/whisper/dedup.db`), pruned by TTL. **This is a firm design requirement, called
-   out here because it is easy to get wrong.**
+   cross-invocation: a small file / SQLite / on-disk KV at **`/var/ossec/var/whisper/dedup.db`**
+   (normative path), pruned by TTL. It must also be **flushable** (a plain file delete resets
+   state) and the **TTL configurable** via the `<options>` channel (§2.3) — both are
+   acceptance-test requirements. **This is a firm design requirement, called out here because it
+   is easy to get wrong.**
 6. `schema_version` lets the dedup/rules contract evolve without silently colliding old and new
    payload shapes.
 
@@ -763,6 +776,12 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ## Change log / provenance
 
+- **v1.1 (2026-07-03):** acceptance-plan alignment (from the #5 verification pass): dedup check
+  now explicitly runs **before** the Whisper lookup (§0 diagram + §7.3 agreed); §2.3 script
+  contract extended with the empirically-verified `argv[5..7]` (options file / timeout / retries)
+  and the `<options>`-driven `api_url`/`dedup_ttl` knobs; §7.5 cache path made normative
+  (`/var/ossec/var/whisper/dedup.db`, flushable, TTL configurable); §4.1 example updated with the
+  real AS60729 values (and `asn.name` noted as nullable — no `HAS_NAME` edge, verified live).
 - **v1.0 (2026-07-02):** initial mapping spec. Derived from the locked decisions in
   [#1](https://github.com/whisper-sec/whisper-wazuh/issues/1) (scope, `data.whisper.*` schema),
   [#2](https://github.com/whisper-sec/whisper-wazuh/issues/2) (Pattern A) and
