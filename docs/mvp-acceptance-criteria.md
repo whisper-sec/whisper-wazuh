@@ -49,7 +49,7 @@ Facts the suite must respect (verified on this stack):
 | script debug output goes to `/var/ossec/logs/integrations.log` **only when** integratord debug is on | test runs enable it once: `docker exec wazuh-single-node-wazuh.manager-1 sh -c "echo 'integrator.debug=2' >> /var/ossec/etc/local_internal_options.conf"` then `wazuh-control restart` (a bare `echo >>` inside `docker exec` redirects on the **host** and silently does nothing) |
 | script argv (empirical) | `argv[1]`=alert tmp file (JSON, one line) · `argv[2]`=api_key · `argv[3]`=hook_url · `argv[4]`=`debug`/`''` · `argv[5]`=options tmp file/`''` · `argv[6]`=timeout (default `10`) · `argv[7]`=retries (default `3`) — read positionally, never rely on `argc` |
 | dedup cache lives at `/var/ossec/var/whisper/dedup.db` (normative — mapping §7.5) | **reset between stateful TCs:** `docker exec wazuh-single-node-wazuh.manager-1 rm -f /var/ossec/var/whisper/dedup.db` — TC-01/09/12/17 start from a clean cache |
-| config knobs `api_url` and `dedup_ttl` resolve `<options>` JSON (argv[5]) → env (`WHISPER_API_URL`/`WHISPER_DEDUP_TTL`) → default (mapping §2.3) | required implementation knobs — TC-10/TC-13 are untestable without them (§5 item 6) |
+| config knobs `api_url`, `dedup_ttl`, `dedup_scope` resolve `<options>` JSON (argv[5]) → env (`WHISPER_API_URL`/`WHISPER_DEDUP_TTL`/`WHISPER_DEDUP_SCOPE`) → default (mapping §2.3) | required implementation knobs — TC-10/TC-13 are untestable without them (§5 item 6) |
 
 ### 1.2 Sanity check (green path, before any TC)
 
@@ -127,10 +127,11 @@ grep-able lines to `/var/ossec/logs/integrations.log` (gated on `argv[4]=='debug
 | `whisper: invoke ioc=<v> type=<t> dedup_key=<k>` | every invocation that extracted an IOC |
 | `whisper: skip reason=non-global ioc=<v>` | public-IP guard fired |
 | `whisper: skip reason=dedup dedup_key=<k>` | dedup suppression — **no API call, no send** |
-| `whisper: skip reason=no-ioc` | filter-matched alert with no supported field path |
-| `whisper: skip reason=unsupported-type field=<path>` | hash/URL candidate ignored (out of MVP scope) |
+| `whisper: skip reason=no-ioc` | filter-matched alert where **no** supported field path held any value (a path holding a non-IOC value is *present* and gets a debug line instead) |
+| `whisper: skip reason=unsupported-type field=<path>` | inactive hash/path candidate ignored (out of MVP scope) |
+| `whisper: skip reason=self-alert` | input alert already carries `data.integration=custom-whisper` — loop guard #3 (defense in depth behind the filter + rule-group separation) |
 | `whisper: api url=<api_url> ms=<n>` | each Whisper HTTP call |
-| `whisper: error class=<auth\|transport\|query> detail=<…>` | failure taxonomy (mirrors opencti's exception classes) |
+| `whisper: error class=<auth\|transport\|query\|socket> detail=<…>` | failure taxonomy (opencti's classes + `socket` for analysisd-socket failures, #16) |
 | `whisper: emit dedup_key=<k> payload_bytes=<n>` | datagram sent to the analysisd socket |
 
 **Domain trigger mechanism** (used by TC-02/03-fallback/06/15/22): raw syslog lines cannot yield
@@ -173,7 +174,7 @@ the expected alert and produce false failures.
 | TC-19 | Secrets handling | Scan repo + `ossec.conf` for the key-format regex (real keys are UUID-shaped, e.g. `[0-9a-f]{8}-[0-9a-f]{4}-…`); the shipped placeholder literal is `WHISPER_API_KEY_PLACEHOLDER`. During an injection, sample `/proc/<pid>/cmdline` of the running script in a tight loop | No regex hit anywhere in repo/conf; key resolves env → `/var/ossec/etc/whisper.key` (`640 root:wazuh`) → argv. **Note:** if `<api_key>` *is* set in `ossec.conf`, integratord passes it as `argv[2]` and it **will** appear in the process cmdline — which is exactly why the recommended tiers leave it as the placeholder; cmdline sampling must show only empty/placeholder (scope AC#10) |
 | TC-20 | uninstall.sh + type stability | Run `uninstall.sh`; then reinstall and enrich **two different seeds** (`185.220.101.1`, then `8.8.8.8` — same-seed pairs collide with dedup) | Uninstall: integration files removed, `ossec.conf` restored, manager restarts clean. Reinstall: **both** alerts findable by `dedup_key` in the indexer, and zero hits for `mapper_parsing_exception` in the manager's filebeat log over the test window (types locked by the mapping §4.3 template block) |
 | TC-21 | No extractable IOC | Inject a filter-matched alert containing **no** `SUPPORTED_FIELD_PATHS` hit | `whisper: invoke`-less run: `whisper: skip reason=no-ioc` line, exit 0, no `api` line, `_count == 0` at T+60 s |
-| TC-22 | Out-of-scope IOC types | Inject a filter-matched alert whose only candidate is a hash/URL field (documented-but-inactive, mapping §9) | `whisper: skip reason=unsupported-type` line; no lookup, no enrichment alert |
+| TC-22 | Out-of-scope IOC types | Inject a filter-matched alert whose only candidates are hash/path fields (`syscheck.sha256_after` / `syscheck.path` — the inactive rows, mapping §9). *Note `data.url` is ACTIVE (host component of absolute URLs) and is covered by TC-02-family tests, not this one.* | `whisper: skip reason=unsupported-type` line per field; no lookup, no enrichment alert |
 
 Each TC maps back to the scope's acceptance criteria (issue #1 §4) — traceability table in §9.
 
@@ -297,6 +298,10 @@ poll-based waits, ~4–6 min startup). Recommended as a follow-up job once the c
 
 ## Change log / provenance
 
+- **v1.1 (2026-07-06):** scaffold alignment (#13 review + #12 Q1): vocabulary adds
+  `skip reason=self-alert` and the `socket` error class; `no-ioc` semantics clarified
+  (path-presence, not value-validity); TC-22 narrowed to the inactive hash/path rows
+  (`data.url` is an active url-host trigger); `dedup_scope` added to the knob row.
 - **v1.0 (2026-07-03):** initial acceptance plan. Mirrors `whisper-opencti/docs/qa-handoff.md`
   (structure, seeds discipline, severity ladder, sign-off) per issue #5; Wazuh mechanics verified
   empirically on the 4.14.5 dev stack (integratord argv/log lines, socket injection, latencies,

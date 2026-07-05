@@ -1,0 +1,8 @@
+{
+  "indicator": "185.220.101.1",
+  "type": "ip",
+  "available": false,
+  "error": "scoring backend degraded",
+  "retryAfter": 60,
+  "advisory": null
+}
