@@ -41,6 +41,13 @@ def wi(whisper_module, tmp_path, monkeypatch):
     monkeypatch.setattr(whisper_module, 'debug_enabled', True)
     for var in ('WHISPER_API_KEY', 'WHISPER_API_URL', 'WHISPER_DEDUP_TTL', 'WHISPER_DEDUP_SCOPE'):
         monkeypatch.delenv(var, raising=False)
+
+    # Hard no-network guard: the unit tier must never reach the live API. Tests that
+    # exercise transport behavior monkeypatch _http_post (or execute_query) themselves.
+    def _no_network(*args, **kwargs):
+        raise AssertionError('unit tests must not reach the network — mock execute_query/_http_post')
+
+    monkeypatch.setattr(whisper_module, '_http_post', _no_network)
     whisper_module._test_log_file = log_file  # convenience handle for assertions
     return whisper_module
 

@@ -304,10 +304,10 @@ fields locked in issue #1 §3.7; the rest are additions this spec introduces and
 | `schema_version` | keyword | Envelope version (`"1.0"`). Lets rules/queries evolve without ambiguity. |
 | `ioc` | keyword | The indicator value that was enriched. |
 | `type` | keyword | `ipv4` \| `ipv6` \| `domain`. |
-| `known` | boolean | Whisper has a node for this IOC (`graph_node_id` is non-null / `explain().found`). Distinct from `verdict`: "known" = *the graph knows it*, not *it is safe*. |
+| `known` | boolean | Whisper has a real graph **node** for this IOC. Determined by an anchored `MATCH` (or a feed listing, which implies a node) — **not** by `explain().found`, which returns `true` for any well-formed domain even with no node (verified 2026-07-06). Distinct from `verdict`: "known" = *the graph knows it*, not *it is safe*. |
 | `verdict` | keyword | `known_good` \| `known_bad` \| `suspicious` \| `unknown` — **evidence-derived** (§6). Never a raw copy of the Whisper score. |
 | `risk_score` | float | Whisper `explain().score` (unbounded float, typ. 0–100+). **Evidence surfaced, never the sole verdict.** Emit consistently as a number (see §2.4 type rule). |
-| `level` | keyword | Whisper `explain().level` enum (`NONE`…`CRITICAL`), verbatim. |
+| `level` | keyword | Whisper `explain().level` enum (`NONE` \| `INFO` \| `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL`), verbatim. `INFO` is a real value (e.g. `8.8.8.8`) — the verdict gates treat it as no-severity (evidence must come from a category/flag). |
 | `available` | boolean | Whisper `explain().available` — the scoring backend answered. `false` (degraded / `retryAfter`) forces `verdict = unknown` (§6, §11). |
 | `advisory` | keyword \| null | The **top-level** `explain()` advisory (e.g. `allowlist-vouched`) — **not** a `coverage` sub-field. Signals an allowlist vouch that downgrades an otherwise-listed IP. |
 | `permalink` | keyword | Deep link to the Whisper graph view for the IOC. |
@@ -481,7 +481,7 @@ one broad `-[r]-`. Edge directions verified live on `google.com`, 2026-07-02.
 | Registrar | `(d)-[:HAS_REGISTRAR]->(:REGISTRAR)` | `whois.registrar` | keyword | Query **before** previous-registrar (ordering is load-bearing). |
 | Previous registrar | `(d)-[:PREV_REGISTRAR]->(:REGISTRAR)` | `whois.previous_registrar` | keyword | Same `REGISTRAR` node can appear under both; current-state (`HAS_REGISTRAR`) wins by first-writer dedup (§8). |
 | Registered by | `(d)-[:REGISTERED_BY]->(:ORGANIZATION)` | `whois.registered_by` | keyword | Registrant org. |
-| WHOIS email | `(d)-[:HAS_EMAIL]->(:EMAIL)` | `whois.email[]` | keyword[] | Sparse; absent (not empty) when unknown. |
+| WHOIS email | `(d)-[:HAS_EMAIL]->(:EMAIL)` | `whois.email[]` | keyword[] | Sparse; emitted as `[]` when unknown (stable structure for idempotency — §7/§8), not omitted. |
 | WHOIS phone | `(d)-[:HAS_PHONE]->(:PHONE)` | `whois.phone[]` | keyword[] | Sparse. |
 | SPF | `(d)-[:SPF_INCLUDE\|SPF_A\|SPF_MX\|SPF_IP\|SPF_REDIRECT\|SPF_EXISTS]->(…)` | `spf` | object | `{include[], a[], mx[], ip[], redirect, exists[]}` — the policy graph, not a raw record string. |
 | Links (out) | `(d)-[:LINKS_TO]->(:HOSTNAME)` | `links.outbound[]` + `links.outbound_total` | keyword[] + int | **Cap displayed to N (e.g. 25); total is a bounded count** — hub domains exceed 1 M links and cannot be exact-counted (§8). |
@@ -525,20 +525,28 @@ e.g. `level: HIGH` with explanation "Informational").
 
 | Condition (evaluated in order — first match wins) | `verdict` |
 |---|---|
-| `available == false` **or** `explain().found == false` **or** `coverage.shared_host == true` **or** `coverage.data_coverage == "no-data"` *(when present)* | `unknown` |
-| (Popularity/Trust feeds only, e.g. `tranco-top1m` / `cloudflare-radar-top1m`) **or** `advisory == "allowlist-vouched"` **or** `node.isWhitelist` | `known_good` |
-| `explain().level ∈ {HIGH, CRITICAL}` **and** ≥1 confirmed-bad feed category (C2, Malware, Phishing, Brute Force, Attack Sources, …) | `known_bad` |
-| `explain().level ∈ {LOW, MEDIUM}`, or a mix of bad + trust feeds, or bad flags backed only by weak/low-quality feeds | `suspicious` |
+| `available == false` **or** `explain().found == false` | `unknown` |
+| a positive trust signal (Popularity/Trust feeds only, `advisory == "allowlist-vouched"`, or `node.isWhitelist`) **AND** no confirmed-bad/threat evidence **AND** `level ∉ {HIGH, CRITICAL}` | `known_good` |
+| `level ∈ {HIGH, CRITICAL}` **and** ≥1 confirmed-bad feed category (C2, Malware, Phishing, Brute Force, Attack Sources, …) | `known_bad` |
+| `level ∈ {LOW, MEDIUM, HIGH, CRITICAL}`, or any threat category / bad node-flag short of confirmed-bad | `suspicious` |
+| found, but only trust/neutral/no evidence and no score band | `unknown` |
 
-> Ordering matters: the `unknown` gate is evaluated **first** so a `shared_host` apex or a
-> `no-data` / backend-unavailable result can never be reported as `known_good`. Only
-> `granularity`, `shared_host`, `found` and `available` are guaranteed present on every
-> `explain()` row; `data_coverage` (hostname-only) is treated as best-effort.
+> **Trust never overrides threat.** The `known_good` gate now requires *no* confirmed-bad or
+> threat evidence and a non-severe level — so an allowlisted-but-compromised host (`isWhitelist`
+> + a phishing listing) correctly derives `known_bad`, not `known_good`.
+>
+> **Coverage gate — implementation limitation.** The §4.1 envelope carries
+> `coverage.{granularity, shared_host, data_coverage}`, but the **REST `explain()` surface exposes
+> no coverage block** (verified 2026-07-06 — it is an MCP-surface-only field), so `shared_host`
+> and `data_coverage` are emitted as `null` and **cannot gate the verdict**. The gate order above
+> is otherwise conservative (any threat signal blocks `known_good`); the one residual case is a
+> multi-tenant apex listed *only* in trust feeds, which derives `known_good` where a coverage
+> signal would have said `unknown`. Tracked as a post-MVP refinement (a `whisper.assess`
+> `host_class` probe) in §11.
 
-> **Coverage gate — no-data ≠ benign.** A `NONE`/clean result means "not listed at this
-> granularity", not "safe". A `shared_host` apex (multi-tenant, e.g. `*.s3.amazonaws.com`) does
-> **not** clear a specific object under it. When coverage is `no-data`/`structural-only` or
-> `shared_host` is true, the verdict is `unknown`, not `known_good`.
+> **Coverage principle — no-data ≠ benign.** A `NONE`/clean result means "not listed at this
+> granularity", not "safe" — hence the found-but-no-evidence row resolves to `unknown`, never
+> `known_good`.
 >
 > **"Listed in N feeds" is not itself bad.** Feed *polarity* comes from the category, and
 > reliability from the per-feed `weight` — `tranco` (weight 1) is good, `stamparm-ipsum`
@@ -681,9 +689,11 @@ Carried over from the sister connector's determinism work and issue #1 AC #4–7
   `links.inbound[]` + `links.inbound_total`, plus a top-level `truncated: true`. Because hub-domain
   `LINKS_TO` fan-out exceeds 1 M (exact `count()` errors), totals are **bounded counts**
   (count-up-to-ceiling), not guaranteed exact — the ceiling is documented, not hidden.
-- **Cypher safety.** Whisper's endpoint does **not** support bound parameters; the IOC must be
-  **JSON-escaped and inlined** as a quoted Cypher string literal (integers inlined as integers).
-  This is both a correctness and an **injection-safety** requirement.
+- **Cypher safety.** The IOC is passed as a **bound query parameter** (`{"parameters": {"v": …}}`
+  on `POST /api/query`) — verified working, including procedure arguments, 2026-07-06. This
+  supersedes the earlier opencti-era guidance to JSON-escape and inline the value: bound
+  parameters eliminate the Cypher-injection surface entirely and keep the plan cacheable. Never
+  string-interpolate the IOC into the query.
 - **Payload guard.** Serialised `data.whisper.*` is budgeted well under 60 KB; on overflow the
   connector drops the largest optional lists first and sets `unmapped_summary` +
   `verdict`/core fields, falling back to a `payload_too_large` marker rather than a failed send
@@ -773,9 +783,12 @@ Flagged by the research pass; to resolve before/while implementing:
 4. **`related.neighbors[]` for IPs.** Reverse `RESOLVES_TO` / co-host enumeration is rejected as an
    unanchored scan. Decide the source (a Whisper co-hosting/attack-surface workflow, or
    passive-DNS/PTR) or mark the field deferred.
-5. **Feed polarity map.** `explain().sources[]` gives `feedId` + `weight` but not category inline,
-   and `LISTED_IN → CATEGORY` is inconsistent. Ship a static `feedId → category/polarity` map
-   (from the feed-catalog / feed-categories docs) so §6 can classify good vs bad reliably.
+5. ~~**Feed polarity map.**~~ **Resolved (#14, 2026-07-06):** a static `feedId → category` map
+   (43 feeds from the live graph) + prefix fallback for per-variant slugs ships in the connector
+   (`FEED_CATEGORIES`), with trust / confirmed-bad / suspicious category sets driving §6.
+   *(New residual, promoted from the §6 coverage note): the REST `explain()` has no coverage block,
+   so a multi-tenant apex listed only in trust feeds can derive `known_good`; a post-MVP
+   `whisper.assess` `host_class` probe would restore the shared-host gate.)*
 6. **`owner` / `business_unit` (IP).** Issue #1 §3.5 lists these, but there is **no Whisper graph
    source** for them — they are asset-inventory (Wazuh-side) data. Either wire them from an asset
    list or mark them deferred. (`tags[]` **is** derivable from Whisper flags/categories and is
@@ -796,6 +809,12 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ## Change log / provenance
 
+- **v1.3 (2026-07-06):** #14 implementation + review. Cypher uses **bound parameters** (§8, verified
+  live — supersedes the inline-escaping guidance); `known`/`graph_node_id` derive from real node
+  existence, **not** `explain().found` (which is `true` for any well-formed domain); §6 verdict
+  gates hardened so a trust signal never overrides confirmed-bad/threat evidence, with the
+  coverage/shared-host gate documented as a REST-surface limitation (residual case → §11); `level`
+  enum includes `INFO`; feed-polarity map resolved (§11 Q5). No mapping-table field renames.
 - **v1.2 (2026-07-06):** field-path validation resolved (#12 Q1): §9 rewritten with the
   live-stack + ruleset-verified table (wrong spellings dropped — `dns.question.name`,
   `audit.remote_ip`, `remote_ip`; Suricata `dest_ip`, Cloudflare, GuardDuty, Security Lake,
