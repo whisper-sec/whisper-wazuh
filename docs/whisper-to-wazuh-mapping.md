@@ -164,9 +164,9 @@ Verified against `virustotal.py` / `maltiverse.py` @ v4.14.5:
   #        framing delimiters)
   ```
 
-  **Decision:** Whisper runs on the manager but enriches alerts whose `agent.id` is usually a
-  real endpoint. Use **Form B** — stamp the enrichment onto the **originating agent** — so the
-  new alert keeps its endpoint linkage in the native Alerts view. (Flagged for confirmation, §11.)
+  **Decision (confirmed, #12 Q3):** Whisper runs on the manager but enriches alerts whose
+  `agent.id` is usually a real endpoint. Use **Form B** — stamp the enrichment onto the
+  **originating agent** — so the new alert keeps its endpoint linkage in the native Alerts view.
 
 - **Size guard:** `maltiverse.py` sets `MAX_EVENT_SIZE = 65535`; an oversized datagram fails with
   `errno 90` ("Message too long"). This is the origin of scope §3.8's **60 KB payload guard**:
@@ -185,9 +185,9 @@ Verified against `virustotal.py` / `maltiverse.py` @ v4.14.5:
   `argv[6]` = timeout (default `10`) · `argv[7]` = retries (default `3`) ·
   plus a literal trailing `> /dev/null 2>&1` argument when debug is off — **read args
   positionally, never rely on `argc`.** The `<options>` JSON (argv[5]) is the config channel for
-  `api_url` and `dedup_ttl`; resolution order: options → environment (`WHISPER_API_URL` /
-  `WHISPER_DEDUP_TTL`) → built-in default. Scripts live in `/var/ossec/integrations/`, perms
-  `750`, owner `root:wazuh`.
+  `api_url`, `dedup_ttl` and `dedup_scope` (`endpoint` | `org` — §7.2); resolution order:
+  options → environment (`WHISPER_API_URL` / `WHISPER_DEDUP_TTL` / `WHISPER_DEDUP_SCOPE`) →
+  built-in default. Scripts live in `/var/ossec/integrations/`, perms `750`, owner `root:wazuh`.
 
 ### 2.4 How `data.whisper.*` lands in the indexer
 
@@ -631,10 +631,11 @@ duplicate; dedup keys on IOC identity (`dedup_key`, below).
 1. **Stable structure → stable key.** Deterministic field ordering and values (the same IOC +
    graph state always serialises identically) is what makes the dedup key itself stable. This is
    the Wazuh analogue of opencti's stable-ID guarantee.
-2. **Dedup key:** `dedup_key = "{type}|{ioc}|{agent_id}"`. `agent_id` is **config-gated**:
-   include it for per-endpoint dedup (the same IOC on two hosts = two analyst-relevant events);
-   drop it for org-wide dedup. (Compare: opencti keys SCO IDs off value(+type); the Whisper
-   Splunk add-on caches keyed by `indicator + type`, TTL 3600 s.)
+2. **Dedup key:** `dedup_key = "{type}|{ioc}|{agent_id}"`. `agent_id` is **config-gated via the
+   `dedup_scope` knob** (§2.3): `endpoint` (default) includes it — the same IOC on two hosts =
+   two analyst-relevant events; `org` drops it for org-wide dedup. (Compare: opencti keys SCO
+   IDs off value(+type); the Whisper Splunk add-on caches keyed by `indicator + type`,
+   TTL 3600 s.)
 3. **Check first — before the Whisper lookup.** On each triggering alert, compute `dedup_key`;
    if it is present and unexpired in the cache, **skip the enrichment entirely — no Whisper API
    call, no socket send** (saves API budget and makes the skip observable as a single log line).
@@ -690,30 +691,47 @@ Carried over from the sister connector's determinism work and issue #1 AC #4–7
 
 ---
 
-## 9. IOC extraction — `SUPPORTED_FIELD_PATHS`
+## 9. IOC extraction — `FIELD_PATHS`
 
-IOCs are pulled from a maintained table of dotted alert-field paths, each with a type hint;
-IPs are validated with stdlib `ipaddress` and **non-global IPs are skipped**. An IP arriving via
-a "domain" path is still treated as an IP (normalise with `ipaddress` first).
+IOCs are pulled from **one maintained table** of dotted alert-field paths, each row carrying a
+type hint (drives the normaliser) and a status (`active` | `inactive`). IPs are validated with
+stdlib `ipaddress` and **non-global IPs are skipped**; `ip:port` / `[ipv6]:port` suffixes are
+stripped and **IPv4-mapped IPv6** (`::ffff:a.b.c.d`) is unwrapped to the embedded IPv4 before
+the guard. An IP arriving via a "domain" path is still treated as an IP.
 
-> This table has **no sister-connector precedent** (OpenCTI hands the connector a typed
-> observable; it never parses alert JSON). The starter set below is inferred from Wazuh 4.14.x
-> decoder conventions and **must be validated against a real 4.14.5 alert corpus** from the dev
-> stack (issue #8 agent) before it is locked — see §11.
+> **Validated (issue #12 Q1, 2026-07-06)** against the live 4.14.5 dev stack, the
+> `wazuh-template.json` mappings, and the 4.14.5 rules/decoders source. Three starter-table
+> spellings turned out **not to exist in Wazuh** and were dropped: `data.dns.question.name`
+> (ECS-style — the real DNS-name paths are `dns.rrname`/`queryName`), `data.audit.remote_ip`
+> (auditd decodes to bare `srcip`) and `data.remote_ip`. Suricata uses **`dest_ip`, not
+> `dst_ip`** (`dst_ip` is Sophos XG only) — both are carried.
 
-| Path (rules-XML name; query as `data.…`) | Hint | Notes |
+| Path (rules-XML name; query as `data.…` unless noted) | Hint | Evidence / notes |
 |---|---|---|
-| `srcip`, `dstip`, `src_ip`, `dst_ip` | ip | Core network decoders. |
-| `win.eventdata.ipAddress`, `win.eventdata.sourceIp`, `win.eventdata.destinationIp` | ip | Windows/Sysmon. |
-| `aws.sourceIPAddress`, `gcp.jsonPayload.sourceIP`, `office365.ClientIP` | ip | Cloud audit. |
-| `audit.remote_ip`, `remote_ip` | ip | Linux audit / generic. |
-| `agent.ip` | ip | Usually internal → skipped by the public-IP guard. |
-| `dns.question.name`, `win.eventdata.queryName` | domain | DNS / Sysmon event 22. |
-| `win.eventdata.destinationHostname`, `http.hostname`, `url` (host component) | domain | Proxy / web. |
-| `syscheck.path`, `syscheck.sha256_after` | (context) | **Documented-but-inactive** — hash triggers are out of MVP scope; listed for the future. |
+| `srcip`, `dstip`, `audit.srcip` | ip | live-observed (sshd 5710/5715, nginx 31101) / template-mapped |
+| `src_ip`, `dst_ip` | ip | Cisco FTD/ASA, Sophos FW decoders |
+| `dest_ip` | ip | Suricata eve (0999 rule 99916) |
+| `http.hostname`, `dns.rrname` | domain | Suricata eve (0999 rules 99917/99918) |
+| `win.eventdata.ipAddress`, `.sourceIp`, `.destinationIp` | ip | Windows/Sysmon — casing verified against 0810/0840 rules |
+| `win.eventdata.queryName`, `.destinationHostname` | domain | Sysmon event 22 / event 3 |
+| `aws.sourceIPAddress` **and** `aws.source_ip_address` | ip | CloudTrail camelCase + Macie snake_case — both real |
+| `aws.srcaddr`, `aws.dstaddr`, `aws.httpRequest.clientIp` | ip | VPC flow logs, AWS WAF |
+| `aws.service.action.networkConnectionAction.remoteIpDetails.ipAddressV4`, `…portProbeAction.portProbeDetails.remoteIpDetails.ipAddressV4` | ip | GuardDuty findings (template type `ip`) |
+| `src_endpoint.ip` | ip | Amazon Security Lake |
+| `gcp.jsonPayload.sourceIP`, `gcp.jsonPayload.queryName` | ip / domain | GCP audit / Cloud DNS |
+| `office365.ClientIP`, `ms-graph.actor.ipAddress` | ip | O365 `ClientIP` often carries `ip:port` — stripped by the normaliser |
+| `ClientIP`, `OriginIP` | ip | Cloudflare WAF (0935 + 0999 rule 99902) |
+| `ip_address` | ip | macOS screen-sharing auth (0999 rules 99909/99910) |
+| `url` | url_host | **Host component of absolute URLs only** — nginx/apache access-log values are path-only (Q1 live evidence); squid-style absolute URLs carry a host |
+| `syscheck.sha256_after`, `syscheck.path` | hash / path | **`inactive`** — hash/path triggers out of MVP scope; present so the extractor emits the normative `unsupported-type` line (TC-22) |
 
-MVP triggers are **only** IPv4/IPv6/Domain (issue #1 §3.1). URL/hash/email paths are recorded
-but not extracted.
+**`agent.ip` is deliberately NOT a trigger** (supersedes the starter table's row): it is present
+on every agent alert, so it would enrich a public-IP agent's own address on every alert (noise —
+the alert is not *about* the agent's IP) and make the `no-ioc` guard line unreachable. It remains
+available as asset/entity *context*. Resolved with #12 Q1.
+
+MVP triggers are **only** IPv4/IPv6/Domain (issue #1 §3.1). Hash/path rows are recorded but not
+extracted; email triggers remain out of scope.
 
 ---
 
@@ -744,12 +762,14 @@ allows); historical-alert backfill (indexer-side reader); optional upstream to `
 
 Flagged by the research pass; to resolve before/while implementing:
 
-1. **`SUPPORTED_FIELD_PATHS` validation.** The §9 table is inferred, not corpus-validated.
-   Validate against real 4.14.5 alerts from the dev-stack agent before locking.
+1. ~~**`SUPPORTED_FIELD_PATHS` validation.**~~ **Resolved (#12 Q1, 2026-07-06):** the §9 table
+   is now validated against the live dev stack + 4.14.5 template/ruleset source; wrong
+   spellings dropped, Suricata/Cloudflare/GuardDuty/Security-Lake paths added, `agent.ip`
+   demoted to context.
 2. **Dedup cache backend & scope.** Confirm the persistent store (file/SQLite under `/var/ossec`),
    the TTL value, and whether `agent_id` is in the key by default (per-endpoint vs org-wide).
-3. **Agent attribution (Form A vs B).** This spec recommends **Form B** (stamp onto the
-   originating agent). Confirm — it affects how the enrichment alert correlates in the dashboard.
+3. ~~**Agent attribution (Form A vs B).**~~ **Resolved (#12 Q3, 2026-07-06): Form B** — the
+   enrichment alert is stamped onto the originating agent (§2.3).
 4. **`related.neighbors[]` for IPs.** Reverse `RESOLVES_TO` / co-host enumeration is rejected as an
    unanchored scan. Decide the source (a Whisper co-hosting/attack-surface workflow, or
    passive-DNS/PTR) or mark the field deferred.
@@ -776,6 +796,12 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ## Change log / provenance
 
+- **v1.2 (2026-07-06):** field-path validation resolved (#12 Q1): §9 rewritten with the
+  live-stack + ruleset-verified table (wrong spellings dropped — `dns.question.name`,
+  `audit.remote_ip`, `remote_ip`; Suricata `dest_ip`, Cloudflare, GuardDuty, Security Lake,
+  Macie snake_case added); `agent.ip` demoted to context; `data.url` clarified as an active
+  url-host trigger (absolute URLs only); `dedup_scope` knob added to §2.3/§7.2; §11 Q1 marked
+  resolved; §11 Q3 resolved — **Form B** agent attribution confirmed.
 - **v1.1 (2026-07-03):** acceptance-plan alignment (from the #5 verification pass): dedup check
   now explicitly runs **before** the Whisper lookup (§0 diagram + §7.3 agreed); §2.3 script
   contract extended with the empirically-verified `argv[5..7]` (options file / timeout / retries)
