@@ -136,19 +136,20 @@ grep-able lines to `/var/ossec/logs/integrations.log` (gated on `argv[4]=='debug
 
 **Domain trigger mechanism** (used by TC-02/03-fallback/06/15/22): raw syslog lines cannot yield
 a domain field, so domain TCs inject a **JSON event** and match it with a **dev-only test rule**
-shipped by `install.sh --dev` (`whisper_test_rules.xml`, rule id `100290`,
-`<decoded_as>json</decoded_as>` + `<field name="dns.question.name" type="pcre2">.+</field>`,
-level 3, group `whisper_test` — included in the `<integration>` filter's `<group>` **only** in
-dev mode). Injection:
+shipped by `install.sh --dev` (`whisper_test_rules.xml`, rule id `100290`, matching a
+`whisper_test` **sentinel** field — `<field name="whisper_test" type="pcre2">^1$</field>` — so it
+can never fire on real DNS logs; the injected event also carries `dns.rrname` (the Q1-validated
+domain path) for the connector to extract; level 3, group `whisper_test` — included in the
+`<integration>` filter's `<group>` **only** in dev mode). Injection:
 
 ```bash
 docker exec wazuh-single-node-wazuh.manager-1 /var/ossec/framework/python/bin/python3 -c \
 "import socket; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM); s.connect('/var/ossec/queue/sockets/queue'); \
-s.send(b'1:whisper-test:{\"dns\":{\"question\":{\"name\":\"google.com\"}}}')"
+s.send(b'1:whisper-test:{\"whisper_test\":\"1\",\"dns\":{\"rrname\":\"google.com\"}}')"
 ```
 
 Stateful TCs (01/09/12/17) begin with the **dedup reset** from §1.1
-(`rm -f /var/ossec/var/whisper/dedup.db`) — without it, earlier runs of the same seed suppress
+(`rm -f /var/ossec/var/whisper/dedup.db*`) — without it, earlier runs of the same seed suppress
 the expected alert and produce false failures.
 
 | ID | Scenario | Steps | Expected |

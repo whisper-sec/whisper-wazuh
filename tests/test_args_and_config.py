@@ -170,8 +170,8 @@ class TestMainErrorSemantics:
         assert api_calls == []
         assert 'whisper: skip reason=dedup dedup_key=ipv4|185.220.101.1|001' in log_lines()
 
-    def test_remaining_send_seam_exits_10(self, wi, write_alert, monkeypatch):
-        """enrich() is real (#14); send_event is still the #16 seam → exit 10."""
-        monkeypatch.setattr(wi, 'enrich', lambda *a, **k: {'integration': 'custom-whisper', 'whisper': {}})
-        alert_file = write_alert(data={'srcip': '185.220.101.1'})
-        assert wi.main(['s', alert_file, '', '', 'debug']) == wi.ERR_NOT_IMPLEMENTED == 10
+    def test_all_seams_implemented(self, wi):
+        """The scaffold seams (#14/#15/#16) are all real now — no NotImplementedError paths."""
+        assert not hasattr(wi, 'ERR_NOT_IMPLEMENTED')
+        for name in ('enrich', 'send_event', 'check_dedup', 'record_dedup'):
+            assert callable(getattr(wi, name))
