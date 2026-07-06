@@ -38,6 +38,7 @@ def wi(whisper_module, tmp_path, monkeypatch):
     log_file = tmp_path / 'integrations.log'
     monkeypatch.setattr(whisper_module, 'LOG_FILE', str(log_file))
     monkeypatch.setattr(whisper_module, 'KEY_FILE', str(tmp_path / 'whisper.key'))
+    monkeypatch.setattr(whisper_module, 'DEDUP_DB', str(tmp_path / 'whisper' / 'dedup.db'))
     monkeypatch.setattr(whisper_module, 'debug_enabled', True)
     for var in ('WHISPER_API_KEY', 'WHISPER_API_URL', 'WHISPER_DEDUP_TTL', 'WHISPER_DEDUP_SCOPE'):
         monkeypatch.delenv(var, raising=False)
