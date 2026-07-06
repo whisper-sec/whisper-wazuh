@@ -151,7 +151,7 @@ class TestMainErrorSemantics:
 
         monkeypatch.setattr(wi, 'enrich', fake_enrich)
         monkeypatch.setattr(wi, 'send_event', lambda payload, agent: 512)
-        monkeypatch.setattr(wi, 'record_dedup', lambda key: recorded.append(key))
+        monkeypatch.setattr(wi, 'record_dedup', lambda key, ttl=0: recorded.append(key))
         alert_file = write_alert(data={'srcip': '185.220.101.1', 'dns': {'rrname': 'evil.example'}})
         rc = wi.main(['s', alert_file, '', '', 'debug'])
         assert rc == 0

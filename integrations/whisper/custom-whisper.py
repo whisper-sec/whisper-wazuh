@@ -27,6 +27,7 @@ import ipaddress
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -1321,22 +1322,92 @@ def enrich(
     return payload
 
 
-# --- seams for the follow-up issues ------------------------------------------------------
+# ==========================================================================================
+# #15 — persistent dedup cache (SQLite; mapping §7)
+# ==========================================================================================
+# integratord spawns this script PER matching alert, so an in-process cache never persists
+# between alerts (mapping §7.5). The cache is an on-disk SQLite DB at DEDUP_DB, shared across
+# invocations. Backend choice = SQLite (#12 Q2): stdlib, atomic commits, a busy_timeout so
+# concurrent script processes serialize writes, and flush == delete the file.
+#
+# HARD CONSTRAINT — DO NOT enable `PRAGMA journal_mode=WAL`. The flush contract (`rm dedup.db*`)
+# and per-commit durability both depend on the DEFAULT rollback journal: WAL would create
+# persistent -wal/-shm sidecars that a bare flush wouldn't clear, and WAL's default
+# synchronous=NORMAL drops the fsync-per-commit that lets the NEXT spawned process see a record.
+#
+# READ/WRITE split (concurrency): check_dedup is a bare SELECT (shared read lock only) so pure
+# reads don't serialize against each other; pruning of expired rows happens in record_dedup,
+# which already holds a write lock — keeping the write lock OFF the hot read path.
+#
+# Fail-OPEN: any cache error makes check_dedup return False (do not suppress) and record_dedup
+# a silent no-op — a duplicate enrichment alert is far better than silently losing enrichment.
+DEDUP_BUSY_TIMEOUT = 5.0  # seconds a write waits on a concurrent writer before "database is locked"
+
+
+def _dedup_connect() -> 'sqlite3.Connection | None':
+    """Open (creating the dir + schema) the dedup DB, or None when it is unavailable."""
+    try:
+        os.makedirs(os.path.dirname(DEDUP_DB), exist_ok=True)
+        conn = sqlite3.connect(DEDUP_DB, timeout=DEDUP_BUSY_TIMEOUT)
+        conn.execute('CREATE TABLE IF NOT EXISTS dedup (key TEXT PRIMARY KEY, ts REAL NOT NULL)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_dedup_ts ON dedup (ts)')  # for the prune
+        return conn
+    except (sqlite3.Error, OSError) as exc:
+        debug(f'whisper: dedup cache unavailable ({exc})')
+        return None
+
+
 def check_dedup(key: str, ttl: int) -> bool:
     """True when `key` was recorded within `ttl` seconds → suppress this enrichment.
 
-    Seam for #15: the persistent, flushable cache at DEDUP_DB (mapping §7.5).
-    The scaffold never suppresses.
+    Read-only (no prune) so it takes only a shared lock. `ttl <= 0` disables dedup. Fails OPEN
+    (returns False) on any cache error. A future timestamp (`age < 0`, e.g. an NTP step-back) is
+    treated as NOT-suppressed so a clock anomaly can never hold back a real enrichment.
+
+    Best-effort, not exactly-once: two processes enriching the SAME IOC can both pass this check
+    before either records, and both emit — a rare duplicate under concurrency. The race can only
+    ever produce a duplicate, never suppress a legitimate first enrichment.
     """
-    return False
+    if ttl <= 0:
+        return False
+    conn = _dedup_connect()
+    if conn is None:
+        return False
+    try:
+        row = conn.execute('SELECT ts FROM dedup WHERE key = ?', (key,)).fetchone()
+    except sqlite3.Error as exc:
+        debug(f'whisper: dedup check failed ({exc})')
+        return False
+    finally:
+        conn.close()
+    if row is None:
+        return False
+    age = time.time() - row[0]
+    return 0 <= age < ttl
 
 
-def record_dedup(key: str) -> None:
-    """Record `key` with a timestamp (mapping §7.3 step 3). Seam for #15.
+def record_dedup(key: str, ttl: int = DEFAULT_DEDUP_TTL) -> None:
+    """Record `key` at the current time (mapping §7.3 step 3) and prune rows older than `ttl`.
 
-    Called only AFTER a successful emit so failed enrichments stay retryable within
-    the TTL — recording earlier would cache failures (TC-09/TC-12 interaction).
+    Silent no-op on cache error. Called only AFTER a successful emit so failed enrichments stay
+    retryable within the TTL — recording earlier would cache failures (TC-09/TC-12 interaction).
+    Re-recording refreshes the timestamp; since duplicates are suppressed *before* emit, this
+    only fires on a genuine (first or post-expiry) emit — effectively one emit per TTL window,
+    reset at each emit.
     """
+    conn = _dedup_connect()
+    if conn is None:
+        return
+    try:
+        now = time.time()
+        with conn:  # single write transaction: prune (housekeeping) + upsert
+            if ttl > 0:
+                conn.execute('DELETE FROM dedup WHERE ts < ?', (now - ttl,))
+            conn.execute('INSERT OR REPLACE INTO dedup (key, ts) VALUES (?, ?)', (key, now))
+    except sqlite3.Error as exc:
+        debug(f'whisper: dedup record failed ({exc})')
+    finally:
+        conn.close()
 
 
 def send_event(payload: dict, alert_agent: 'dict | None') -> int:
@@ -1401,7 +1472,7 @@ def main(args: 'list[str]') -> int:
                 ioc, ioc_type, key, build_source_ref(alert, field_path), api_url, api_key, timeout, retries
             )
             sent = send_event(payload, alert.get('agent'))
-            record_dedup(key)  # only after a successful emit — failures stay retryable
+            record_dedup(key, dedup_ttl)  # only after a successful emit — failures stay retryable
             log_emit(key, sent)
             emitted += 1
         except WhisperAuthError as exc:

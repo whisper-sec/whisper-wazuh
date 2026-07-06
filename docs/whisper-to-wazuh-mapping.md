@@ -651,13 +651,25 @@ duplicate; dedup keys on IOC identity (`dedup_key`, below).
    AC #8: *"re-running within the dedup TTL produces no duplicate enrichment alerts."*
 4. **TTL:** default 3600 s (Splunk-add-on parity). After expiry a fresh enrichment alert is
    allowed — intentional re-surfacing of still-relevant context.
-5. **Persistent cache — required.** `integratord` **spawns the script per matching alert**, so an
-   in-process dict does **not** persist between alerts and would never dedup. The cache **must** be
-   cross-invocation: a small file / SQLite / on-disk KV at **`/var/ossec/var/whisper/dedup.db`**
-   (normative path), pruned by TTL. It must also be **flushable** (a plain file delete resets
-   state) and the **TTL configurable** via the `<options>` channel (§2.3) — both are
-   acceptance-test requirements. **This is a firm design requirement, called out here because it
-   is easy to get wrong.**
+5. **Persistent cache — required (implemented in #15).** `integratord` **spawns the script per
+   matching alert**, so an in-process dict does **not** persist between alerts and would never
+   dedup. The cache is a cross-invocation **SQLite** DB at **`/var/ossec/var/whisper/dedup.db`**
+   (backend decided in #12 Q2 — stdlib `sqlite3`, atomic commits, `busy_timeout` so concurrent
+   script processes serialize writes; **default rollback journal, no WAL**, so no persistent
+   sidecar files — flush with `rm dedup.db*`). One table `dedup(key PRIMARY KEY, ts)` (indexed on
+   `ts`). `check_dedup` is a **read-only `SELECT`** (shared lock — the write lock stays off the hot
+   read path); `record_dedup` prunes expired rows (`ts < now − ttl`) under the write lock it
+   already holds for the upsert, so the DB stays bounded by the TTL window. The check runs
+   **before** the Whisper lookup; the key is recorded **only after a successful emit** (a failed
+   enrichment stays retryable). **Fail-open:** any cache error makes `check_dedup` return `false`
+   (never suppress) — a duplicate alert beats silently losing all enrichment. A future timestamp
+   (clock step-back) is treated as not-suppressed so a clock anomaly can't hold back enrichment.
+   TTL is configurable via the `<options>.dedup_ttl` knob (§2.3), `0` disables dedup, and each
+   genuine emit **resets** the window (last-seen).
+   > **Concurrency note:** two processes enriching the *same* IOC can race between check and record
+   > and both emit — a rare duplicate under high concurrency for one IOC (best-effort suppression,
+   > not a hard lock). The race can only ever produce a *duplicate*, never suppress a legitimate
+   > first enrichment.
 6. `schema_version` lets the dedup/rules contract evolve without silently colliding old and new
    payload shapes.
 
@@ -776,8 +788,10 @@ Flagged by the research pass; to resolve before/while implementing:
    is now validated against the live dev stack + 4.14.5 template/ruleset source; wrong
    spellings dropped, Suricata/Cloudflare/GuardDuty/Security-Lake paths added, `agent.ip`
    demoted to context.
-2. **Dedup cache backend & scope.** Confirm the persistent store (file/SQLite under `/var/ossec`),
-   the TTL value, and whether `agent_id` is in the key by default (per-endpoint vs org-wide).
+2. ~~**Dedup cache backend & scope.**~~ **Resolved (#12 Q2 / #15, 2026-07-06):** backend =
+   **SQLite** at `/var/ossec/var/whisper/dedup.db` (default journal, fail-open); default TTL
+   **3600 s** (`dedup_ttl` knob); scope defaults to **per-endpoint** (`agent_id` in the key;
+   `dedup_scope=org` drops it) — §7.
 3. ~~**Agent attribution (Form A vs B).**~~ **Resolved (#12 Q3, 2026-07-06): Form B** — the
    enrichment alert is stamped onto the originating agent (§2.3).
 4. **`related.neighbors[]` for IPs.** Reverse `RESOLVES_TO` / co-host enumeration is rejected as an
@@ -809,6 +823,9 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ## Change log / provenance
 
+- **v1.4 (2026-07-06):** #15 — persistent dedup cache implemented (§7.5). Backend decided:
+  **SQLite** (resolves #12 Q2), default rollback journal (single-file flush), fail-open,
+  TTL-pruned, check-before-lookup / record-after-emit, sliding window. §11 Q2 marked resolved.
 - **v1.3 (2026-07-06):** #14 implementation + review. Cypher uses **bound parameters** (§8, verified
   live — supersedes the inline-escaping guidance); `known`/`graph_node_id` derive from real node
   existence, **not** `explain().found` (which is `true` for any well-formed domain); §6 verdict
