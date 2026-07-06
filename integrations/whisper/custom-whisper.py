@@ -15,11 +15,8 @@ Contracts implemented here (do not drift — the acceptance tests grep for them)
 
 Runtime: the manager's bundled Python (3.10) — stdlib only, no third-party imports.
 
-Scaffold status (#13): extraction, guards, config resolution and logging are complete;
-the enrichment client (#14), dedup cache (#15) and socket write-back (#16) are seams
-that raise/no-op until their issues land. The seam signatures carry everything the
-mapping-§4.2 envelope needs (source_ref, dedup_key), so those issues slot in without
-rewriting main().
+Pipeline (all stages implemented): extract IOCs (#13) → dedup check (#15) → enrich via
+the Whisper graph (#14) → inject a new alert onto the analysisd socket (#16) → record dedup.
 """
 
 import http.client
@@ -27,6 +24,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 import sys
 import time
@@ -57,7 +55,6 @@ ERR_SOCKET_OPERATION = 5  # reserved — #16
 ERR_FILE_NOT_FOUND = 6
 ERR_INVALID_JSON = 7
 ERR_AUTH = 8  # terminal auth failure (TC-12)
-ERR_NOT_IMPLEMENTED = 10  # scaffold seams — removed as #14/#15/#16 land
 
 INTEGRATION_NAME = 'custom-whisper'
 
@@ -68,6 +65,7 @@ LOG_FILE = f'{pwd}/logs/integrations.log'
 KEY_FILE = f'{pwd}/etc/whisper.key'
 SOCKET_ADDR = f'{pwd}/queue/sockets/queue'
 DEDUP_DB = f'{pwd}/var/whisper/dedup.db'  # normative path — mapping §7.5
+MAX_EVENT_SIZE = 65535  # analysisd DGRAM datagram limit (matches maltiverse.py); errno 90 above it
 
 # --- configuration defaults (resolution: <options> JSON → environment → default) --------
 API_KEY_PLACEHOLDER = 'WHISPER_API_KEY_PLACEHOLDER'
@@ -1410,13 +1408,53 @@ def record_dedup(key: str, ttl: int = DEFAULT_DEDUP_TTL) -> None:
         conn.close()
 
 
+# ==========================================================================================
+# #16 — analysisd socket write-back (mapping §2.3)
+# ==========================================================================================
+def frame_event(payload: dict, agent: 'dict | None') -> str:
+    """Frame the enrichment event for the analysisd queue socket (mapping §2.3).
+
+    Form A (manager/local — agent absent or id '000'):  `1:custom-whisper:<json>`
+    Form B (real originating agent — Q3 decision):        `1:<location>-><name>:<json>`
+      where location = `[<id>] (<name>) <ip|any>`, then `.replace('|','||').replace(':','|:')`
+      so colons/pipes inside it can't collide with the `1:...:` framing delimiters.
+
+    The leading `1` is the analysisd queue message type (a location-prefixed event). Compact
+    JSON separators keep the datagram small; no trailing newline.
+    """
+    body = json.dumps(payload, separators=(',', ':'))
+    if not agent or str(agent.get('id')) == '000':
+        return f'1:{INTEGRATION_NAME}:{body}'
+    location = f'[{agent.get("id")}] ({agent.get("name")}) {agent.get("ip") or "any"}'
+    location = location.replace('|', '||').replace(':', '|:')
+    return f'1:{location}->{INTEGRATION_NAME}:{body}'
+
+
 def send_event(payload: dict, alert_agent: 'dict | None') -> int:
     """Frame + send the enrichment event to the analysisd socket; returns bytes sent.
 
-    Seam for #16 (Form A/B framing per mapping §2.3 — pending #12 Q3). Socket-layer
-    failures raise WhisperSocketError so main()'s taxonomy handling stays uniform.
+    Stamps the alert onto the originating agent (Form B, #12 Q3). Socket-layer failures
+    (missing socket, connect refused, errno 90 oversize) raise WhisperSocketError so
+    main()'s error taxonomy handles them uniformly (never an unhandled traceback).
     """
-    raise NotImplementedError('socket write-back lands with #16')
+    encoded = frame_event(payload, alert_agent).encode('utf-8')
+    # Two independent ceilings: enrich() budgets the JSON body to ~60 KB (MAX_PAYLOAD_BYTES +
+    # FRAMING_MARGIN); this guard is the datagram hard limit (65535). fit_payload may still
+    # return an over-budget core payload tagged `payload_too_large`, so re-check here.
+    if len(encoded) > MAX_EVENT_SIZE:
+        raise WhisperSocketError(f'framed event {len(encoded)}B exceeds {MAX_EVENT_SIZE}B (errno 90)')
+    try:
+        # socket() is inside the try so an fd-exhaustion (EMFILE) OSError at construction is
+        # mapped to WhisperSocketError too — never an unhandled traceback.
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sock.connect(SOCKET_ADDR)
+            sock.send(encoded)
+        finally:
+            sock.close()
+    except OSError as exc:
+        raise WhisperSocketError(f'analysisd socket send failed at {SOCKET_ADDR}: {exc}') from exc
+    return len(encoded)
 
 
 # --- entry point --------------------------------------------------------------------------
@@ -1482,9 +1520,6 @@ def main(args: 'list[str]') -> int:
         except WhisperError as exc:
             log_error(exc)
             errors += 1
-        except NotImplementedError as exc:
-            log_always(f'# Error: scaffold seam not implemented: {exc}')
-            return ERR_NOT_IMPLEMENTED
 
     # Exit 0 when anything landed (TC-15: a successful emit must not produce an
     # 'Exit status was:' line in ossec.log); non-zero only for all-failure runs (TC-13).
