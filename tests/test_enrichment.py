@@ -122,6 +122,19 @@ class TestHttpClient:
         wi.execute_query('u', 'k', 'MATCH (n {name: $v}) RETURN n', {'v': 'x'})
         assert captured['parameters'] == {'v': 'x'}
 
+    def test_explicit_user_agent_sent(self, wi, monkeypatch):
+        """The Whisper WAF 403s urllib's default 'Python-urllib' UA — we must send our own."""
+        captured = {}
+
+        def fake_post(url, body, headers, timeout):
+            captured.update(headers)
+            return 200, json.dumps({'rows': []}).encode(), {}
+
+        monkeypatch.setattr(wi, '_http_post', fake_post)
+        wi.execute_query('u', 'k', 'RETURN 1')
+        assert captured.get('User-Agent') == wi.USER_AGENT
+        assert not captured['User-Agent'].lower().startswith('python-urllib')
+
     def test_ssl_context_uses_interpreter_default_when_populated(self, wi, monkeypatch):
         class FakeCtx:
             def get_ca_certs(self):
