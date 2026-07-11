@@ -322,9 +322,25 @@ class TestVerdictDerivation:
         row = {'available': True, 'found': True, 'level': 'NONE', 'sources': []}
         assert wi.derive_verdict(row, {}) == 'unknown'
 
-    def test_bad_flags_alone_are_suspicious(self, wi):
+    def test_weak_bad_flags_alone_are_suspicious(self, wi):
+        """Annoyance-level flags (bruteforce/scanner/spam) are threat evidence but NOT
+        confirmed-malicious on their own → suspicious, not known_bad (#30)."""
         row = {'available': True, 'found': True, 'level': 'NONE', 'sources': []}
-        assert wi.derive_verdict(row, {'isC2': True}) == 'suspicious'
+        assert wi.derive_verdict(row, {'isBruteforce': True}) == 'suspicious'
+        assert wi.derive_verdict(row, {'isScanner': True}) == 'suspicious'
+
+    def test_hard_bad_flag_alone_is_known_bad(self, wi):
+        """#30: a confirmed-malicious node flag is known_bad on its own — no HIGH level or
+        confirmed-bad feed CATEGORY required (the node IS bad infrastructure)."""
+        row = {'available': True, 'found': True, 'level': 'NONE', 'sources': []}
+        for flag in ('isC2', 'isMalware', 'isPhishing', 'isBotnet',
+                     'isExfilDestination', 'isOfacSanctioned', 'isStateActor'):
+            assert wi.derive_verdict(row, {flag: True}) == 'known_bad', flag
+
+    def test_generic_threat_flag_stays_suspicious(self, wi):
+        """isThreat is a generic aggregate, not a confirmed-bad classification → suspicious."""
+        row = {'available': True, 'found': True, 'level': 'NONE', 'sources': []}
+        assert wi.derive_verdict(row, {'isThreat': True}) == 'suspicious'
 
     def test_whitelist_flag_cannot_override_confirmed_bad(self, wi):
         """A compromised whitelisted host: isWhitelist must NOT force known_good."""
@@ -432,9 +448,46 @@ class TestIpEnrichment:
         assert w['available'] is False and w['verdict'] == 'unknown'
         assert 'retryAfter=60' in w['unmapped_summary']
 
+    def _wire_threat_ip(self, router, belongs_row):
+        """Listed IP with a caller-supplied BELONGS_TO row so #29 prefix threat props can vary."""
+        router.add('CALL explain', [TOR_EXPLAIN], ioc='185.220.101.1')
+        router.add('CALL explain', [{'available': True, 'found': True, 'breakdown': None}], ioc='AS60729')
+        router.add('CALL explain', [{'available': True, 'found': True, 'breakdown': None}], ioc='AS15169')
+        router.add('RETURN n.isThreat', [TOR_FLAGS])
+        router.add('BELONGS_TO', [belongs_row])
+
+    def test_prefix_threat_emitted(self, wi, router):
+        """#29: registered-PREFIX threat props ride the existing BELONGS_TO traversal (no extra
+        round-trip). Verified live 2026-07-11: the /24 reads CRITICAL while its ASN aggregate
+        reads NONE — the granular prefix signal is the actionable one (ASN aggregate dropped as
+        noise: only 2/116k ASNs carry a non-NONE level)."""
+        self._wire_threat_ip(router, {
+            'prefix': '185.220.101.0/24', 'asn': 'AS60729', 'asn_name': None,
+            'asn_country': 'DE', 'country': 'DE', 'city': None,
+            'prefix_threat_level': 'CRITICAL', 'prefix_threat_score': 14,
+            'prefix_is_threat': True, 'prefix_threat_neighbors': 151,
+        })
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
+        assert w['prefix_threat'] == {
+            'level': 'CRITICAL', 'score': 14, 'is_threat': True, 'threat_neighbor_count': 151,
+        }
+        assert 'threat' not in w['asn']  # ASN-level aggregate deliberately not emitted
+
+    def test_benign_prefix_stays_quiet(self, wi, router):
+        """A listed IP whose registered prefix carries no threat signal must NOT sprout an
+        empty prefix_threat block (the quiet-level gate)."""
+        self._wire_threat_ip(router, {
+            'prefix': '8.8.8.0/24', 'asn': 'AS15169', 'asn_name': 'GOOGLE',
+            'asn_country': 'US', 'country': 'US', 'city': None,
+            'prefix_threat_level': 'NONE', 'prefix_threat_score': 0,
+            'prefix_is_threat': False, 'prefix_threat_neighbors': 0,
+        })
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
+        assert 'prefix_threat' not in w
+
 
 class TestDomainEnrichment:
-    def _wire_domain(self, router, links_count=2):
+    def _wire_domain(self, router, links_count=2, suspicious_count=0):
         router.add(
             'CALL explain',
             [
@@ -475,6 +528,7 @@ class TestDomainEnrichment:
         router.add('<-[:LINKS_TO]-(o:HOSTNAME) WITH o LIMIT 26 RETURN o.name', [])
         router.add('-[:LINKS_TO]->(o:HOSTNAME) WITH o LIMIT 500 RETURN count', [{'c': links_count}])
         router.add('<-[:LINKS_TO]-(o:HOSTNAME) WITH o LIMIT 500 RETURN count', [{'c': 0}])
+        router.add('WHERE o.isThreat WITH o LIMIT 500 RETURN count', [{'c': suspicious_count}])
         router.add('UNWIND $cands', [{'name': '3vil.example'}])
 
     def test_domain_envelope(self, wi, router):
@@ -509,6 +563,18 @@ class TestDomainEnrichment:
         assert w['coverage']['granularity'] == 'hostname'
         assert w['graph_node_id'] == 'hostname/evil.example'
         assert w['permalink'].endswith('/domain/evil.example')
+
+    def test_suspicious_link_count_emitted(self, wi, router):
+        """#30: outbound links to threat-listed domains surface as links.suspicious_count."""
+        self._wire_domain(router, suspicious_count=3)
+        w = wi.enrich('evil.example', 'domain', 'k', {}, *make_cfg_args())['whisper']
+        assert w['links']['suspicious_count'] == 3
+
+    def test_no_suspicious_links_stays_quiet(self, wi, router):
+        """Zero threat-linked targets → the field is omitted (a clean domain stays quiet)."""
+        self._wire_domain(router, suspicious_count=0)
+        w = wi.enrich('evil.example', 'domain', 'k', {}, *make_cfg_args())['whisper']
+        assert 'suspicious_count' not in w['links']
 
     def test_ns_mx_query_directions(self, wi, router):
         """The seed's OWN NS/MX are matched with `<-` (neighbour→seed edges)."""

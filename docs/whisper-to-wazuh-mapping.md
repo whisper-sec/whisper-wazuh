@@ -273,6 +273,7 @@ integrations (`{'integration': '<name>', '<name>': {…}}`):
     },
     "asn": { "number": 60729 },
     "prefix": "185.220.101.0/24",
+    "prefix_threat": { "level": "CRITICAL", "score": 14, "is_threat": true, "threat_neighbor_count": 151 },
     "geo": { "country": "DE" },
     "threat_feed": {
       "feeds": ["dan-tor-exit", "stamparm-ipsum", "tor-exit-nodes", "stopforumspam-listed-ip-7d"],
@@ -363,9 +364,9 @@ fields and relies on OpenSearch **coercion** of the stringified values (verified
 
 | Field | Type |
 |---|---|
-| `risk_score`, `variants.confidence`, `asn.reputation.*` | `float` |
-| `asn.number`, `threat_feed.sources_count`, `links.inbound_total`/`outbound_total` | `long` |
-| `known`, `available`, `truncated`, `coverage.shared_host` | `boolean` |
+| `risk_score`, `variants.confidence`, `asn.reputation.*`, `prefix_threat.score` | `float` |
+| `asn.number`, `threat_feed.sources_count`, `links.inbound_total`/`outbound_total`/`suspicious_count`, `prefix_threat.threat_neighbor_count` | `long` |
+| `known`, `available`, `truncated`, `coverage.shared_host`, `prefix_threat.is_threat` | `boolean` |
 | `threat_feed.first_seen`/`last_seen` | `date` |
 
 All numeric/date entries carry `ignore_malformed: true` — a bad value drops the **field**, never
@@ -469,6 +470,7 @@ IPv6 has **no `HAS_COUNTRY` edge** — its country comes via `LOCATED_IN → CIT
 | `(ip)-[:HAS_COUNTRY]->(:COUNTRY).name` (IPv4) / `(ip)-[:LOCATED_IN]->(:CITY)` (IPv6) | `geo.country` | keyword | ISO country code. Best-effort — anycast IPs report the operator HQ, not the edge (§11). |
 | `(ip)-[:LOCATED_IN]->(:CITY).name` | `geo.city` | keyword | e.g. `Mountain View, US`. Absent for anycast. |
 | `(ip)-[:BELONGS_TO]->(:PREFIX).name` | `prefix` | keyword | RIR/announced prefix (CIDR). |
+| `(ip)-[:BELONGS_TO]->(:PREFIX)` threat props (`threatLevel,threatScore,isThreat,threatNeighborCount`) | `prefix_threat.{level,score,is_threat,threat_neighbor_count}` | object | **#29 — rides the same `BELONGS_TO→PREFIX` traversal (no extra round-trip).** The registered prefix carries its own threat verdict independent of the ASN aggregate (verified `185.220.101.0/24` → `CRITICAL, 151 neighbors` while `AS60729` reads `NONE`), so the granular /prefix/ signal is the actionable one. **Signal-gated:** omitted entirely for benign prefixes (a `NONE` level is not emitted). ASN-level aggregate deliberately not emitted (only 2/116 k ASNs carry a non-`NONE` level; noise for hyperscalers — `asn.reputation` already scores the ASN). BGP-hijack (announced≠registered ASN) → the `bgp-hijack-exposure` on-demand workflow, not per-alert (legitimate MOAS is common). |
 | reverse `RESOLVES_TO` / co-host | `related.neighbors[]` + `related.neighbors_total` | object[] + int | **Deferred / best-effort — see §11.** A plain reverse `MATCH (h:HOSTNAME)-[:RESOLVES_TO]->(ip {name})` is rejected as an unanchored 2.6 B-node scan; needs a co-hosting workflow or passive-DNS path. Omit (with a note in `unmapped_summary`) if unavailable. |
 
 ### 5.2 Domain
@@ -491,6 +493,7 @@ one broad `-[r]-`. Edge directions verified live on `google.com`, 2026-07-02.
 | SPF | `(d)-[:SPF_INCLUDE\|SPF_A\|SPF_MX\|SPF_IP\|SPF_REDIRECT\|SPF_EXISTS]->(…)` | `spf` | object | `{include[], a[], mx[], ip[], redirect, exists[]}` — the policy graph, not a raw record string. |
 | Links (out) | `(d)-[:LINKS_TO]->(:HOSTNAME)` | `links.outbound[]` + `links.outbound_total` | keyword[] + int | **Cap displayed to N (e.g. 25); total is a bounded count** — hub domains exceed 1 M links and cannot be exact-counted (§8). |
 | Links (in) | `(d)<-[:LINKS_TO]-(:HOSTNAME)` | `links.inbound[]` + `links.inbound_total` | keyword[] + int | As above. Many inbound links from legit sites = trust signal. |
+| Links (suspicious) | `(d)-[:LINKS_TO]->(o:HOSTNAME) WHERE o.isThreat` (bounded 500) | `links.suspicious_count` | int | **#30 — guilt by association:** how many outbound targets are threat-listed. **Emitted only when > 0** (a clean domain stays quiet). Verified live 2026-07-11 (`google.com` → 1). |
 | Variants | in-process generator + existence check (see note) | `variants[]` | object[] | `{variant, method, confidence}`. Registered look-alikes only (`exists ≠ malicious`). |
 | Threat feed | `explain().sources[]` + `node.is*` | `threat_feed.{feeds[],categories[],flags[],sources_count,first_seen,last_seen}` | object | As §5.1. Domain first/last-seen come from `explain().sources[]` (HOSTNAME nodes lack `threatFirstSeen/LastSeen`). Evidence only. |
 | Verdict | `explain().level`/`.score` + Popularity/Trust feeds | `verdict` / `risk_score` / `level` | — | §6. |
@@ -532,8 +535,8 @@ e.g. `level: HIGH` with explanation "Informational").
 |---|---|
 | `available == false` **or** `explain().found == false` | `unknown` |
 | a positive trust signal (Popularity/Trust feeds only, `advisory == "allowlist-vouched"`, or `node.isWhitelist`) **AND** no confirmed-bad/threat evidence **AND** `level ∉ {HIGH, CRITICAL}` | `known_good` |
-| `level ∈ {HIGH, CRITICAL}` **and** ≥1 confirmed-bad feed category (C2, Malware, Phishing, Brute Force, Attack Sources, …) | `known_bad` |
-| `level ∈ {LOW, MEDIUM, HIGH, CRITICAL}`, or any threat category / bad node-flag short of confirmed-bad | `suspicious` |
+| a **confirmed-malicious node flag** (`isC2`, `isMalware`, `isPhishing`, `isBotnet`, `isExfilDestination`, `isOfacSanctioned`, `isStateActor`) — the node IS bad infrastructure (**#30**) — **OR** `level ∈ {HIGH, CRITICAL}` **and** ≥1 confirmed-bad feed category (C2, Malware, Phishing, Brute Force, Attack Sources, …) | `known_bad` |
+| `level ∈ {LOW, MEDIUM, HIGH, CRITICAL}`, or any threat category / weak bad node-flag short of confirmed-bad (`isThreat`, `isSpam`, `isBlacklist`, `isBruteforce`, `isScanner`, `isDga`, Tor/proxy/VPN context) | `suspicious` |
 | found, but only trust/neutral/no evidence and no score band | `unknown` |
 
 > **Trust never overrides threat.** The `known_good` gate now requires *no* confirmed-bad or

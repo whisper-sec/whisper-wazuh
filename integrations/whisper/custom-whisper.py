@@ -780,6 +780,22 @@ BAD_FLAGS = frozenset(
         'isStateActor',
     }
 )
+# Flags that are confirmed-malicious on their OWN (#30) — the node IS bad infrastructure,
+# so the verdict is known_bad regardless of feed category or severity level. Distinct from
+# BAD_FLAGS: the generic/aggregate (isThreat), the annoyance (isBruteforce/isScanner), the
+# heuristic (isDga), and the merely-listed (isSpam/isBlacklist) stay suspicious-level evidence,
+# not known_bad. isOfacSanctioned = legally designated; isStateActor = nation-state attribution.
+HARD_BAD_FLAGS = frozenset(
+    {
+        'isC2',
+        'isMalware',
+        'isPhishing',
+        'isBotnet',
+        'isExfilDestination',
+        'isOfacSanctioned',
+        'isStateActor',
+    }
+)
 TAG_BY_FLAG = {
     'isThreat': 'threat',
     'isC2': 'c2',
@@ -841,6 +857,7 @@ def derive_verdict(explain_row: dict, flags: dict, known: bool = True) -> str:
     has_confirmed_bad = any(c in CONFIRMED_BAD_CATEGORIES for c in categories)
     has_suspicious_cat = any(c in SUSPICIOUS_CATEGORIES for c in categories)
     has_bad_flags = any(flags.get(f) for f in BAD_FLAGS)
+    has_hard_bad_flag = any(flags.get(f) for f in HARD_BAD_FLAGS)
     has_threat_evidence = has_confirmed_bad or has_suspicious_cat or has_bad_flags
 
     # Gate 1 — unknown: no data ≠ benign. `known` is node existence, not explain().found.
@@ -855,8 +872,10 @@ def derive_verdict(explain_row: dict, flags: dict, known: bool = True) -> str:
     if has_trust_signal and not has_threat_evidence and level not in ('HIGH', 'CRITICAL'):
         return 'known_good'
 
-    # Gate 3 — known_bad: severity AND a confirmed-bad category.
-    if level in ('HIGH', 'CRITICAL') and has_confirmed_bad:
+    # Gate 3 — known_bad: a confirmed-malicious node flag on its own (#30 — the node IS bad
+    # infrastructure: C2/malware/phishing/botnet/exfil/OFAC-sanctioned/state-actor), OR the
+    # classic severity+confirmed-bad-category combination.
+    if has_hard_bad_flag or (level in ('HIGH', 'CRITICAL') and has_confirmed_bad):
         return 'known_bad'
 
     # Gate 4 — suspicious: a real score band, or any threat evidence short of confirmed-bad.
@@ -906,6 +925,17 @@ def build_tags(flags: dict, categories: 'list[str]') -> 'list[str]':
 _ASN_NUM_RE = re.compile(r'^AS(\d+)$')
 # No direct IP→ASN edge: BELONGS_TO→PREFIX←ROUTES−ASN; human name via HAS_NAME (nullable —
 # verified: AS60729 has no ASN_NAME). IPv6 has no HAS_COUNTRY edge — country via ASN/CITY.
+# Registered-PREFIX threat props (#29) ride the SAME traversal — no extra round-trip. Verified
+# live 2026-07-11: the PREFIX carries its own threatLevel/isThreat (185.220.101.0/24 → CRITICAL)
+# independent of the ASN aggregate (AS60729 → NONE), so the granular /prefix/ signal is the
+# actionable one. The ASN-level aggregate was evaluated and deliberately NOT emitted: only 2 of
+# 116k ASNs carry a non-NONE level, while hasThreateningPrefixes/score>0 fire for benign
+# hyperscalers (Google's AS15169 → score 1, has_threatening true) — too noisy to be useful, and
+# asn.reputation already scores the ASN.
+_IP_THREAT_RETURN = (
+    'p.threatLevel AS prefix_threat_level, p.threatScore AS prefix_threat_score, '
+    'p.isThreat AS prefix_is_threat, p.threatNeighborCount AS prefix_threat_neighbors'
+)
 _Q_IP_CONTEXT_V4 = (
     'MATCH (ip:IPV4 {name: $v}) '
     'OPTIONAL MATCH (ip)-[:BELONGS_TO]->(p:PREFIX)<-[:ROUTES]-(a:ASN) '
@@ -914,7 +944,8 @@ _Q_IP_CONTEXT_V4 = (
     'OPTIONAL MATCH (ip)-[:HAS_COUNTRY]->(c:COUNTRY) '
     'OPTIONAL MATCH (ip)-[:LOCATED_IN]->(city:CITY) '
     'RETURN p.name AS prefix, a.name AS asn, an.name AS asn_name, '
-    'ac.name AS asn_country, c.name AS country, city.name AS city LIMIT 1'
+    'ac.name AS asn_country, c.name AS country, city.name AS city, '
+    + _IP_THREAT_RETURN + ' LIMIT 1'
 )
 _Q_IP_CONTEXT_V6 = (
     'MATCH (ip:IPV6 {name: $v}) '
@@ -923,8 +954,44 @@ _Q_IP_CONTEXT_V6 = (
     'OPTIONAL MATCH (a)-[:HAS_COUNTRY]->(ac:COUNTRY) '
     'OPTIONAL MATCH (ip)-[:LOCATED_IN]->(city:CITY) '
     'RETURN p.name AS prefix, a.name AS asn, an.name AS asn_name, '
-    'ac.name AS asn_country, city.name AS city LIMIT 1'
+    'ac.name AS asn_country, city.name AS city, '
+    + _IP_THREAT_RETURN + ' LIMIT 1'
 )
+
+
+# Threat levels that carry no actionable signal — used to keep benign infra out of the
+# envelope (a clean IP must not sprout an empty asn.threat / prefix_threat block).
+_QUIET_LEVELS = frozenset({None, 'NONE', 'INFO', 'UNKNOWN'})
+
+
+def _num(value: 'object') -> 'int | float | None':
+    """int/float pass-through (bool excluded — it is an int subclass); anything else → None.
+    Whisper returns threat scores as JSON numbers, so this is a type guard, not a parser."""
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, (int, float)) else None
+
+
+def _prefix_threat(ctx: dict) -> 'dict | None':
+    """Registered-prefix threat props (#29) — the granular signal: a threat-listed /24 whose
+    ASN aggregate reads clean (verified 185.220.101.0/24 → CRITICAL under AS60729 → NONE).
+    Same gate as the ASN: a benign prefix stays out of the envelope."""
+    level = ctx.get('prefix_threat_level')
+    score = _num(ctx.get('prefix_threat_score'))
+    is_threat = ctx.get('prefix_is_threat') is True
+    if not (is_threat or (score is not None and score > 0) or level not in _QUIET_LEVELS):
+        return None
+    out: dict = {}
+    if level and level not in _QUIET_LEVELS:
+        out['level'] = level
+    if score is not None:
+        out['score'] = score
+    if is_threat:
+        out['is_threat'] = True
+    neighbors = _num(ctx.get('prefix_threat_neighbors'))
+    if neighbors is not None:
+        out['threat_neighbor_count'] = neighbors
+    return out or None
 
 
 def build_ip_fragments(cfg: dict, ioc: str, ioc_type: str, flags: dict, notes: 'list[str]') -> dict:
@@ -963,6 +1030,9 @@ def build_ip_fragments(cfg: dict, ioc: str, ioc_type: str, flags: dict, notes: '
         fragments['asn'] = asn_obj
     if ctx.get('prefix'):
         fragments['prefix'] = ctx['prefix']
+    prefix_threat = _prefix_threat(ctx)
+    if prefix_threat:
+        fragments['prefix_threat'] = prefix_threat
     if geo:
         fragments['geo'] = geo
     # related.neighbors[] (reverse RESOLVES_TO / co-hosting) is deferred graph-wide — a plain
@@ -1023,6 +1093,12 @@ _Q_LINKS_OUT_COUNT = (
 )
 _Q_LINKS_IN_COUNT = (
     'MATCH (d:HOSTNAME {name: $v})<-[:LINKS_TO]-(o:HOSTNAME) WITH o LIMIT 500 RETURN count(o) AS c'
+)
+# #30 — of the (bounded) outbound links, how many target a threat-listed domain. Guilt by
+# association: a page linking out to known-bad hosts. Verified live 2026-07-11 (google.com → 1).
+_Q_LINKS_OUT_SUSPICIOUS_COUNT = (
+    'MATCH (d:HOSTNAME {name: $v})-[:LINKS_TO]->(o:HOSTNAME) '
+    'WHERE o.isThreat WITH o LIMIT 500 RETURN count(o) AS c'
 )
 
 
@@ -1179,6 +1255,11 @@ def build_domain_fragments(cfg: dict, ioc: str, notes: 'list[str]', trunc: 'list
         'inbound': in_names,
         'inbound_total': in_total,
     }
+    # Threat-linked outbound targets (#30) — emitted only when non-zero (a clean domain
+    # stays quiet; the vast majority link out to nothing threat-listed).
+    suspicious_out, _ = _count_capped(cfg, _Q_LINKS_OUT_SUSPICIOUS_COUNT, ioc)
+    if suspicious_out > 0:
+        fragments['links']['suspicious_count'] = suspicious_out
 
     fragments['variants'] = confirm_variants(cfg, generate_domain_variants(ioc), trunc)
     return fragments
