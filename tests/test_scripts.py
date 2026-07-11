@@ -74,6 +74,7 @@ class TestSafetyInvariants:
             'whisper_suspicious',
             'whisper_known_good',
             'whisper_unknown',
+            'whisper_c2',
         ):
             assert g in t
 

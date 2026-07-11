@@ -65,4 +65,16 @@
     <group>whisper_unknown,</group>
   </rule>
 
+  <!-- Opt-in TLS-fingerprint enrichment (#32). A Cobalt Strike default JARM is a strong C2
+       indicator the threat feeds routinely miss (~97% of emitters read clean), so it escalates
+       INDEPENDENT of verdict — the verdict for such an IP is usually 'unknown'. Fires only when
+       the tls_fingerprint enrichment is enabled AND the IP is in the JARM catalog. -->
+  <rule id="100206" level="12">
+    <if_sid>100200</if_sid>
+    <field name="whisper.tls.family" type="pcre2">^cobalt-strike-default$</field>
+    <description>Whisper: $(whisper.ioc) emits a Cobalt Strike default JARM fingerprint (possible C2)</description>
+    <options>no_full_log</options>
+    <group>whisper_c2,</group>
+  </rule>
+
 </group>

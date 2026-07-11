@@ -78,6 +78,41 @@ class TestOptionsResolution:
         assert wi.load_options(str(bad)) == {}
 
 
+class TestExtraEnrichments:
+    """#32 — opt-in Tier-2 features: <options> list → env → default none; unknown ignored."""
+
+    def test_default_none(self, wi):
+        assert wi.resolve_extra_enrichments({}, {}) == frozenset()
+
+    def test_options_json_list(self, wi):
+        assert wi.resolve_extra_enrichments({'extra_enrichments': ['tls_fingerprint']}, {}) == {'tls_fingerprint'}
+
+    def test_options_comma_string(self, wi):
+        got = wi.resolve_extra_enrichments({'extra_enrichments': 'tls_fingerprint, foo'}, {})
+        assert got == {'tls_fingerprint'}  # unknown 'foo' filtered out
+
+    def test_env_fallback(self, wi):
+        got = wi.resolve_extra_enrichments({}, {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'})
+        assert got == {'tls_fingerprint'}
+
+    def test_options_beats_env(self, wi):
+        # a present (even empty) options list means "no extras", not "fall through to env"
+        got = wi.resolve_extra_enrichments({'extra_enrichments': []}, {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'})
+        assert got == frozenset()
+
+    def test_unknown_only_is_empty(self, wi):
+        assert wi.resolve_extra_enrichments({'extra_enrichments': ['bogus', 'nope']}, {}) == frozenset()
+
+    def test_malformed_present_value_does_not_defer_to_env(self, wi):
+        """A present-but-malformed options value (dict/int/bool) means 'no extras' — it must
+        NOT silently fall through to the env var (a config typo can't be env-overridden)."""
+        env = {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'}
+        for bad in ({}, 0, True, 3.14):
+            assert wi.resolve_extra_enrichments({'extra_enrichments': bad}, env) == frozenset(), bad
+        # absent key still falls through to env
+        assert wi.resolve_extra_enrichments({}, env) == {'tls_fingerprint'}
+
+
 class TestApiKeyResolution:
     """env → key file → argv; the placeholder never counts (scope §3.8, TC-19)."""
 

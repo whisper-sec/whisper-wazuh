@@ -36,6 +36,12 @@
                   "threat_neighbor_count": { "type": "long", "ignore_malformed": true }
                 }
               },
+              "tls": {
+                "properties": {
+                  "cluster_size": { "type": "long", "ignore_malformed": true },
+                  "count": { "type": "long", "ignore_malformed": true }
+                }
+              },
               "threat_feed": {
                 "properties": {
                   "sources_count": { "type": "long", "ignore_malformed": true },
