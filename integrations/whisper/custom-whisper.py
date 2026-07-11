@@ -472,6 +472,9 @@ def build_source_ref(alert: dict, field_path: str) -> dict:
 # Bound parameters verified against the live API 2026-07-06 (incl. procedure args) — this
 # supersedes the older literal-inlining constraint documented from the opencti era.
 API_QUERY_PATH = '/api/query'
+CONNECTOR_VERSION = '1.0'
+# Must NOT start with 'Python-urllib' — the Whisper API WAF blocks that default UA (see below).
+USER_AGENT = f'whisper-wazuh-connector/{CONNECTOR_VERSION}'
 BACKOFF_BASE = 0.5
 BACKOFF_CAP = 60.0
 # Common CA-bundle locations, tried when the interpreter's compiled-in paths are empty.
@@ -549,7 +552,9 @@ def execute_query(
       network failure            → WhisperTransportError
       other 4xx / bad body       → WhisperQueryError
     """
-    headers = {'Content-Type': 'application/json'}
+    # An explicit User-Agent is REQUIRED: the Whisper API's WAF 403s urllib's default
+    # `Python-urllib/x.y` UA (verified live 2026-07-11). Any non-default UA passes.
+    headers = {'Content-Type': 'application/json', 'User-Agent': USER_AGENT}
     if api_key:
         headers['X-API-Key'] = api_key
     body: dict = {'query': cypher}
