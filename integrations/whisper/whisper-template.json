@@ -46,7 +46,8 @@
               "links": {
                 "properties": {
                   "inbound_total": { "type": "long", "ignore_malformed": true },
-                  "outbound_total": { "type": "long", "ignore_malformed": true }
+                  "outbound_total": { "type": "long", "ignore_malformed": true },
+                  "suspicious_count": { "type": "long", "ignore_malformed": true }
                 }
               },
               "variants": {

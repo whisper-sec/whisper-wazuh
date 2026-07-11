@@ -780,6 +780,22 @@ BAD_FLAGS = frozenset(
         'isStateActor',
     }
 )
+# Flags that are confirmed-malicious on their OWN (#30) — the node IS bad infrastructure,
+# so the verdict is known_bad regardless of feed category or severity level. Distinct from
+# BAD_FLAGS: the generic/aggregate (isThreat), the annoyance (isBruteforce/isScanner), the
+# heuristic (isDga), and the merely-listed (isSpam/isBlacklist) stay suspicious-level evidence,
+# not known_bad. isOfacSanctioned = legally designated; isStateActor = nation-state attribution.
+HARD_BAD_FLAGS = frozenset(
+    {
+        'isC2',
+        'isMalware',
+        'isPhishing',
+        'isBotnet',
+        'isExfilDestination',
+        'isOfacSanctioned',
+        'isStateActor',
+    }
+)
 TAG_BY_FLAG = {
     'isThreat': 'threat',
     'isC2': 'c2',
@@ -841,6 +857,7 @@ def derive_verdict(explain_row: dict, flags: dict, known: bool = True) -> str:
     has_confirmed_bad = any(c in CONFIRMED_BAD_CATEGORIES for c in categories)
     has_suspicious_cat = any(c in SUSPICIOUS_CATEGORIES for c in categories)
     has_bad_flags = any(flags.get(f) for f in BAD_FLAGS)
+    has_hard_bad_flag = any(flags.get(f) for f in HARD_BAD_FLAGS)
     has_threat_evidence = has_confirmed_bad or has_suspicious_cat or has_bad_flags
 
     # Gate 1 — unknown: no data ≠ benign. `known` is node existence, not explain().found.
@@ -855,8 +872,10 @@ def derive_verdict(explain_row: dict, flags: dict, known: bool = True) -> str:
     if has_trust_signal and not has_threat_evidence and level not in ('HIGH', 'CRITICAL'):
         return 'known_good'
 
-    # Gate 3 — known_bad: severity AND a confirmed-bad category.
-    if level in ('HIGH', 'CRITICAL') and has_confirmed_bad:
+    # Gate 3 — known_bad: a confirmed-malicious node flag on its own (#30 — the node IS bad
+    # infrastructure: C2/malware/phishing/botnet/exfil/OFAC-sanctioned/state-actor), OR the
+    # classic severity+confirmed-bad-category combination.
+    if has_hard_bad_flag or (level in ('HIGH', 'CRITICAL') and has_confirmed_bad):
         return 'known_bad'
 
     # Gate 4 — suspicious: a real score band, or any threat evidence short of confirmed-bad.
@@ -1075,6 +1094,12 @@ _Q_LINKS_OUT_COUNT = (
 _Q_LINKS_IN_COUNT = (
     'MATCH (d:HOSTNAME {name: $v})<-[:LINKS_TO]-(o:HOSTNAME) WITH o LIMIT 500 RETURN count(o) AS c'
 )
+# #30 — of the (bounded) outbound links, how many target a threat-listed domain. Guilt by
+# association: a page linking out to known-bad hosts. Verified live 2026-07-11 (google.com → 1).
+_Q_LINKS_OUT_SUSPICIOUS_COUNT = (
+    'MATCH (d:HOSTNAME {name: $v})-[:LINKS_TO]->(o:HOSTNAME) '
+    'WHERE o.isThreat WITH o LIMIT 500 RETURN count(o) AS c'
+)
 
 
 def _names(cfg: dict, cypher: str, ioc: str) -> 'list[str]':
@@ -1230,6 +1255,11 @@ def build_domain_fragments(cfg: dict, ioc: str, notes: 'list[str]', trunc: 'list
         'inbound': in_names,
         'inbound_total': in_total,
     }
+    # Threat-linked outbound targets (#30) — emitted only when non-zero (a clean domain
+    # stays quiet; the vast majority link out to nothing threat-listed).
+    suspicious_out, _ = _count_capped(cfg, _Q_LINKS_OUT_SUSPICIOUS_COUNT, ioc)
+    if suspicious_out > 0:
+        fragments['links']['suspicious_count'] = suspicious_out
 
     fragments['variants'] = confirm_variants(cfg, generate_domain_variants(ioc), trunc)
     return fragments

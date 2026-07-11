@@ -36,6 +36,7 @@ class TestTemplateFile:
         assert tf['first_seen']['type'] == 'date' and tf['last_seen']['type'] == 'date'
         links = w['links']['properties']
         assert links['inbound_total']['type'] == 'long' and links['outbound_total']['type'] == 'long'
+        assert links['suspicious_count']['type'] == 'long'  # #30
         assert w['variants']['properties']['confidence']['type'] == 'float'
         rep = w['asn']['properties']['reputation']['properties']
         assert all(rep[k]['type'] == 'float' for k in rep)
