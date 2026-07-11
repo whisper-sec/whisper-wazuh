@@ -17,6 +17,11 @@ services:
       - "514:514/udp"
       - "55000:55000"
     environment:
+      # Whisper API key for the custom-whisper connector — sourced from a gitignored .env
+      # (see .env.example). Empty by default; the connector then falls back to the key file
+      # or reports auth failure. Set it once and it survives `make dev-reset` (compose
+      # re-injects on every `up`), unlike the in-container key file.
+      - WHISPER_API_KEY=${WHISPER_API_KEY:-}
       - INDEXER_URL="https://wazuh.indexer:9200"
       - INDEXER_USERNAME=admin
       - INDEXER_PASSWORD=SecretPassword

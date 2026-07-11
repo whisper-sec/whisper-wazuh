@@ -151,3 +151,42 @@ curl -sk -u admin:SecretPassword "https://localhost:9200/wazuh-alerts-*/_search"
 
 The agent is containerized, so it monitors the container (not your host) — fine for generating
 alerts and connector test data.
+## Whisper connector
+
+Install the `custom-whisper` integration into the dev manager and exercise it:
+
+```bash
+make dev-whisper-install    # install (dev mode: test rule + template + refresh index)
+make dev-whisper-smoke      # inject a public IP + two guarded IPs, print the log evidence
+make dev-whisper-uninstall  # remove it and restore ossec.conf
+```
+
+### Whisper API key
+
+The connector resolves its key in this order: **`WHISPER_API_KEY` env → `/var/ossec/etc/whisper.key` → argv**.
+Two ways to set it on the dev stack:
+
+- **`.env` (recommended)** — set it once; it survives `make dev-reset`. Copy the example and edit:
+
+  ```bash
+  cp dev/wazuh-single-node/.env.example dev/wazuh-single-node/.env
+  # edit .env: WHISPER_API_KEY=<your key>
+  make dev-up            # (re)create the manager so it picks up the key from .env
+  ```
+
+  `.env` lives in `dev/wazuh-single-node/` (where `docker compose` reads it) and is gitignored.
+  It's injected into the manager container's environment (`docker-compose.yml`
+  `WHISPER_API_KEY=${WHISPER_API_KEY:-}`), which the connector reads first.
+
+- **Key file** — put the key directly in the (in-container) key file. Simpler, but wiped by
+  `make dev-reset`:
+
+  ```bash
+  docker exec wazuh-single-node-wazuh.manager-1 sh -c \
+    'umask 137; printf "%s\n" "<your key>" > /var/ossec/etc/whisper.key; chown root:wazuh /var/ossec/etc/whisper.key'
+  ```
+
+No restart is needed after changing the key — the script reads it fresh on the next alert.
+Without a valid key the connector reaches the API but gets `403` (anonymous); guards, dedup and
+alert rendering still work. The stock `dev-agent-demo` IOC (`203.0.113.45`) is TEST-NET and the
+connector **deliberately skips it** — use a public IOC to see enrichment.
