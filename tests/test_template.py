@@ -39,6 +39,10 @@ class TestTemplateFile:
         assert w['variants']['properties']['confidence']['type'] == 'float'
         rep = w['asn']['properties']['reputation']['properties']
         assert all(rep[k]['type'] == 'float' for k in rep)
+        # #29 registered-prefix threat fields
+        pt = w['prefix_threat']['properties']
+        assert pt['score']['type'] == 'float' and pt['threat_neighbor_count']['type'] == 'long'
+        assert pt['is_threat']['type'] == 'boolean'
 
     def test_numerics_and_dates_never_reject_an_alert(self):
         """ignore_malformed on every numeric/date field — a bad value must drop the FIELD,

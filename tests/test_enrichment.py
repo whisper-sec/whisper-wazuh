@@ -432,6 +432,43 @@ class TestIpEnrichment:
         assert w['available'] is False and w['verdict'] == 'unknown'
         assert 'retryAfter=60' in w['unmapped_summary']
 
+    def _wire_threat_ip(self, router, belongs_row):
+        """Listed IP with a caller-supplied BELONGS_TO row so #29 prefix threat props can vary."""
+        router.add('CALL explain', [TOR_EXPLAIN], ioc='185.220.101.1')
+        router.add('CALL explain', [{'available': True, 'found': True, 'breakdown': None}], ioc='AS60729')
+        router.add('CALL explain', [{'available': True, 'found': True, 'breakdown': None}], ioc='AS15169')
+        router.add('RETURN n.isThreat', [TOR_FLAGS])
+        router.add('BELONGS_TO', [belongs_row])
+
+    def test_prefix_threat_emitted(self, wi, router):
+        """#29: registered-PREFIX threat props ride the existing BELONGS_TO traversal (no extra
+        round-trip). Verified live 2026-07-11: the /24 reads CRITICAL while its ASN aggregate
+        reads NONE — the granular prefix signal is the actionable one (ASN aggregate dropped as
+        noise: only 2/116k ASNs carry a non-NONE level)."""
+        self._wire_threat_ip(router, {
+            'prefix': '185.220.101.0/24', 'asn': 'AS60729', 'asn_name': None,
+            'asn_country': 'DE', 'country': 'DE', 'city': None,
+            'prefix_threat_level': 'CRITICAL', 'prefix_threat_score': 14,
+            'prefix_is_threat': True, 'prefix_threat_neighbors': 151,
+        })
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
+        assert w['prefix_threat'] == {
+            'level': 'CRITICAL', 'score': 14, 'is_threat': True, 'threat_neighbor_count': 151,
+        }
+        assert 'threat' not in w['asn']  # ASN-level aggregate deliberately not emitted
+
+    def test_benign_prefix_stays_quiet(self, wi, router):
+        """A listed IP whose registered prefix carries no threat signal must NOT sprout an
+        empty prefix_threat block (the quiet-level gate)."""
+        self._wire_threat_ip(router, {
+            'prefix': '8.8.8.0/24', 'asn': 'AS15169', 'asn_name': 'GOOGLE',
+            'asn_country': 'US', 'country': 'US', 'city': None,
+            'prefix_threat_level': 'NONE', 'prefix_threat_score': 0,
+            'prefix_is_threat': False, 'prefix_threat_neighbors': 0,
+        })
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
+        assert 'prefix_threat' not in w
+
 
 class TestDomainEnrichment:
     def _wire_domain(self, router, links_count=2):

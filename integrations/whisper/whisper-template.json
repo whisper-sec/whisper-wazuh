@@ -29,6 +29,13 @@
                   }
                 }
               },
+              "prefix_threat": {
+                "properties": {
+                  "score": { "type": "float", "ignore_malformed": true },
+                  "is_threat": { "type": "boolean" },
+                  "threat_neighbor_count": { "type": "long", "ignore_malformed": true }
+                }
+              },
               "threat_feed": {
                 "properties": {
                   "sources_count": { "type": "long", "ignore_malformed": true },
