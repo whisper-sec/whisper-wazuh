@@ -54,6 +54,32 @@ def wi(whisper_module, tmp_path, monkeypatch):
 
 
 @pytest.fixture()
+def router(wi, monkeypatch):
+    """Route execute_query calls to canned rows; records every (cypher, params) call."""
+
+    class Router:
+        def __init__(self):
+            self.routes = []  # (substring, ioc_filter, rows)
+            self.calls = []
+
+        def add(self, substring, rows, ioc=None):
+            self.routes.append((substring, ioc, rows))
+
+        def __call__(self, api_url, api_key, cypher, params=None, timeout=10, retries=3):
+            self.calls.append((cypher, params))
+            for substring, ioc, rows in self.routes:
+                if substring in cypher and (
+                    ioc is None or (params or {}).get('ioc', (params or {}).get('v')) == ioc
+                ):
+                    return rows if not callable(rows) else rows()
+            return []
+
+    r = Router()
+    monkeypatch.setattr(wi, 'execute_query', r)
+    return r
+
+
+@pytest.fixture()
 def log_lines(wi):
     """Callable returning the vocabulary lines written so far."""
 

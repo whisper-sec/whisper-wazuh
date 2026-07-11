@@ -200,19 +200,27 @@ The wazuh-indexer (OpenSearch) applies `extensions/elasticsearch/7.x/wazuh-templ
   (exact-match, no `.keyword` subfield). So **string `data.whisper.*` fields index with no template
   change** — this is how community custom integrations work.
 
-> **Type-stability pitfall (must design around):** numbers/booleans are **not** covered by
-> `string_as_keyword`; the first document to carry `data.whisper.risk_score` as a JSON number
-> freezes it to `long`/`float` for the life of the index. A later document sending the same field
-> as a **string** (or vice-versa) is rejected with `mapper_parsing_exception` — **and the whole
-> alert can be dropped.** Wazuh's own template sidesteps this by typing VirusTotal's
-> numeric-looking fields (`positives`, `total`, `malicious`) as `keyword`.
+> **Stringification (verified live on 4.14.5 — supersedes the earlier "first-write-wins"
+> analysis):** `analysisd`'s JSON decoder converts **every leaf value to a string** before
+> indexing — `7.4` → `"7.400000"`, `true` → `"true"`, `60729` → `"60729"`, and JSON `null` →
+> the **literal string `"null"`**. Two consequences:
 >
-> **Rules for `data.whisper.*`:** (1) keep it **shallow**; (2) use **consistent types on every
-> emitted alert** — never mix string/number for the same key; (3) arrays of **scalars** are fine,
-> arrays of objects with *varying* keys are not; (4) if `risk_score` must be range-queried /
-> aggregated, emit it as a real number **and** ship an explicit `data.whisper` mapping block in
-> the indexer template **before first ingest** (§4.3). We ship that block rather than rely on
-> dynamic mapping — it locks types and prevents first-write-wins conflicts.
+> 1. There is **no numeric-vs-string first-write conflict** to guard against — nothing arrives
+>    numeric, so without a template every `data.whisper.*` field maps `keyword` and
+>    `risk_score`/counts can never be range-queried or aggregated. The fix is the **§4.3
+>    template**: type those fields numerically/boolean/date and let OpenSearch **coerce** the
+>    stringified values (`"7.400000"` → `float` — coercion + range query verified live).
+> 2. The connector **strips `null` values** from the payload before sending (`strip_nulls`) —
+>    otherwise nullable fields (`asn.name`, `advisory`, `graph_node_id`, …) index as the
+>    keyword string `"null"`. Nullable fields are *omitted* when unknown; empty **lists** are
+>    kept (stable structure; they index as no-value).
+>
+> **Rules for `data.whisper.*`:** (1) keep it **shallow**; (2) arrays of **scalars** are fine,
+> arrays of objects with *varying* keys are not; (3) never emit JSON `null`; (4) every
+> non-string field must be typed in the §4.3 template — numeric/date entries carry
+> `ignore_malformed` (a bad value drops the field, never the alert); booleans cannot
+> (`ignore_malformed` is unsupported there), so boolean fields must only ever receive
+> `"true"`/`"false"` — which the connector guarantees. Installed **before first ingest**.
 
 ---
 
@@ -254,7 +262,6 @@ integrations (`{'integration': '<name>', '<name>': {…}}`):
     "verdict": "suspicious",
     "risk_score": 7.35,
     "level": "HIGH",
-    "advisory": null,
     "permalink": "https://graph.whisper.security/ip/185.220.101.1",
     "graph_node_id": "ipv4/185.220.101.1",
     "source_ref": {
@@ -264,9 +271,9 @@ integrations (`{'integration': '<name>', '<name>': {…}}`):
       "field_path": "data.srcip",
       "original_full_log": "…first 512 chars of the source alert's full_log…"
     },
-    "asn": { "number": 60729, "name": null },
+    "asn": { "number": 60729 },
     "prefix": "185.220.101.0/24",
-    "geo": { "country": "DE", "city": null },
+    "geo": { "country": "DE" },
     "threat_feed": {
       "feeds": ["dan-tor-exit", "stamparm-ipsum", "tor-exit-nodes", "stopforumspam-listed-ip-7d"],
       "categories": ["TOR Network", "General Blacklists"],
@@ -276,9 +283,8 @@ integrations (`{'integration': '<name>', '<name>': {…}}`):
       "last_seen": "2026-06-29T12:11:13Z"
     },
     "tags": ["tor", "anonymizer", "spam"],
-    "coverage": { "granularity": "ipv4", "shared_host": false, "data_coverage": null },
+    "coverage": { "granularity": "ipv4" },
     "dedup_key": "ipv4|185.220.101.1|001",
-    "unmapped_summary": null,
     "truncated": false
   }
 }
@@ -286,6 +292,11 @@ integrations (`{'integration': '<name>', '<name>': {…}}`):
 
 Indexed, this becomes `data.integration = "custom-whisper"`, `data.whisper.verdict = "suspicious"`,
 `data.whisper.threat_feed.feeds = [...]`, etc.
+
+> **No `null` anywhere:** nullable fields (`advisory`, `asn.name` — AS60729 has no `HAS_NAME` —
+> `geo.city`, `unmapped_summary`, `coverage.shared_host`/`data_coverage`) are **omitted** when
+> unknown, never sent as JSON `null`: analysisd stringifies `null` into the literal keyword
+> `"null"` (§2.4, verified live). Empty *lists* are kept.
 
 > **Why `suspicious`, not `known_bad`, at `level: HIGH`?** This is the core principle in action
 > (§6): the Whisper score/level is *evidence*, not the verdict. Here the feeds are Tor /
@@ -309,61 +320,56 @@ fields locked in issue #1 §3.7; the rest are additions this spec introduces and
 | `risk_score` | float | Whisper `explain().score` (unbounded float, typ. 0–100+). **Evidence surfaced, never the sole verdict.** Emit consistently as a number (see §2.4 type rule). |
 | `level` | keyword | Whisper `explain().level` enum (`NONE` \| `INFO` \| `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL`), verbatim. `INFO` is a real value (e.g. `8.8.8.8`) — the verdict gates treat it as no-severity (evidence must come from a category/flag). |
 | `available` | boolean | Whisper `explain().available` — the scoring backend answered. `false` (degraded / `retryAfter`) forces `verdict = unknown` (§6, §11). |
-| `advisory` | keyword \| null | The **top-level** `explain()` advisory (e.g. `allowlist-vouched`) — **not** a `coverage` sub-field. Signals an allowlist vouch that downgrades an otherwise-listed IP. |
+| `advisory` | keyword *(omitted when unknown)* | The **top-level** `explain()` advisory (e.g. `allowlist-vouched`) — **not** a `coverage` sub-field. Signals an allowlist vouch that downgrades an otherwise-listed IP. **Never `null`** — nullable fields are stripped before send (§2.4). |
 | `permalink` | keyword | Deep link to the Whisper graph view for the IOC. |
 | `graph_node_id` | keyword | Stable Whisper node id (e.g. `ipv4/185.220.101.1`). |
-| `coverage` | object | `{granularity, shared_host, data_coverage}` — `granularity` ← `explain().coverage.granularity`, `shared_host` ← `explain().coverage.sharedHost`, `data_coverage` ← `explain().coverage.dataCoverage` (**hostname-only, optional/best-effort** — absent on IPs). Gates verdict — **no-data ≠ benign** (§6). |
+| `coverage` | object | `granularity` ← IOC type (always present). `shared_host` / `data_coverage` are MCP-surface-only signals unavailable at the REST layer — **omitted** (never `null`), so `coverage` is typically just `{granularity}`. |
 | `source_ref` | object | Linkage back to the triggering alert: `rule_id`, `alert_id`, `agent_id`, `field_path` (the `SUPPORTED_FIELD_PATHS` entry that produced the IOC, recorded in `data.`-prefixed form, e.g. `data.srcip`), `original_full_log` (truncated). |
 | `dedup_key` | keyword | The idempotency key that suppressed/allowed this alert (§7). |
-| `unmapped_summary` | text \| null | One-line summary of Whisper data the connector saw but did **not** map (no silent drops, §8). `null` when nothing was dropped. |
+| `unmapped_summary` | text *(omitted when nothing was dropped)* | One-line summary of Whisper data the connector saw but did **not** map (no silent drops, §8). Absent — not `null` — when there is nothing to report (§2.4). |
 | `truncated` | boolean | `true` if any list field was capped (§8). Per-list totals live beside each list. |
 
-### 4.3 Indexer mapping block (typed fields, before first ingest)
+### 4.3 Indexer template (typed fields with coercion — implemented in #17)
 
-`string_as_keyword` (§2.4) only covers *strings*. Ship an explicit mapping for the
-numeric/boolean/date `data.whisper.*` fields to **lock their types and prevent the
-first-write-wins conflict**. Install it on the wazuh-indexer (as a component/index-template
-override on `wazuh-alerts-4.x-*`) **before the first enrichment alert**:
+`string_as_keyword` (§2.4) maps everything `keyword` because analysisd stringifies all values.
+The shipped template — **`integrations/whisper/whisper-template.json`** — types the non-string
+fields and relies on OpenSearch **coercion** of the stringified values (verified live: a doc with
+`"risk_score": "7.400000"` indexes as `float` and answers range queries).
 
-```json
-{
-  "mappings": {
-    "properties": {
-      "data": {
-        "properties": {
-          "whisper": {
-            "properties": {
-              "risk_score":  { "type": "float" },
-              "known":       { "type": "boolean" },
-              "available":   { "type": "boolean" },
-              "truncated":   { "type": "boolean" },
-              "threat_feed": {
-                "properties": {
-                  "sources_count": { "type": "integer" },
-                  "first_seen":    { "type": "date" },
-                  "last_seen":     { "type": "date" }
-                }
-              },
-              "links": {
-                "properties": {
-                  "inbound_total":  { "type": "long" },
-                  "outbound_total": { "type": "long" }
-                }
-              },
-              "asn": { "properties": { "number": { "type": "long" } } }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-```
+**Install mechanics (resolves §11 Q9, verified live on the 4.14.5 indexer):**
 
-Every other `data.whisper.*` field is a string or array-of-strings and maps to `keyword`
-automatically. Keep the object shallow to stay well under `total_fields.limit` (§2.4). The exact
-install API (legacy `_template` vs. composable/component template on the OpenSearch indexer) is an
-open item — §11 Q9.
+- The stock alerts template is a **legacy** template (`_template/wazuh`, `order: 0`, patterns
+  `wazuh-alerts-4.x-*` + `wazuh-archives-4.x-*`); no composable template touches the alerts
+  patterns (composable ones are all `wazuh-states-*`).
+- Ours installs as a **second legacy template at `order: 1`** — legacy templates merge by order,
+  so it rides on top of the stock one (merge verified live: stock fields keep their mappings).
+  **Never convert it to a composable `_index_template`** — a matching composable template
+  silently *disables* all legacy templates for that index, nuking the entire stock mapping.
+- Install (**before the first enrichment alert** — this PUT becomes a step of #18's
+  `install.sh`, which does not exist yet):
+
+  ```bash
+  curl -sk -u <user>:<pass> -XPUT "https://<indexer>:9200/_template/whisper" \
+    -H 'Content-Type: application/json' -d @whisper-template.json
+  ```
+
+- Templates apply to **new indices only**, and `wazuh-alerts-4.x-*` roll daily — after install
+  the types take effect from the next daily index (on a dev stack, delete the current day's
+  index to re-create it typed).
+- The legacy `_template` API rejects unknown top-level keys (verified: `400` on a `_comment`
+  key) — the template file must contain only `order`/`index_patterns`/`settings`/`mappings`.
+
+**What the template types** (everything else is a string and maps `keyword` automatically):
+
+| Field | Type |
+|---|---|
+| `risk_score`, `variants.confidence`, `asn.reputation.*` | `float` |
+| `asn.number`, `threat_feed.sources_count`, `links.inbound_total`/`outbound_total` | `long` |
+| `known`, `available`, `truncated`, `coverage.shared_host` | `boolean` |
+| `threat_feed.first_seen`/`last_seen` | `date` |
+
+All numeric/date entries carry `ignore_malformed: true` — a bad value drops the **field**, never
+the alert. Keep the object shallow to stay well under `total_fields.limit` (§2.4).
 
 ### 4.4 Worked example — domain (`known_bad`)
 
@@ -383,14 +389,13 @@ Illustrative payload for a phishing typosquat, exercising the richer domain shap
     "verdict": "known_bad",
     "risk_score": 62.4,
     "level": "HIGH",
-    "advisory": null,
     "permalink": "https://graph.whisper.security/domain/paypa1-secure.example",
     "graph_node_id": "hostname/paypa1-secure.example",
     "source_ref": {
       "rule_id": "62123",
       "alert_id": "1751418000.987654",
       "agent_id": "004",
-      "field_path": "data.dns.question.name",
+      "field_path": "data.dns.rrname",
       "original_full_log": "…"
     },
     "dns": {
@@ -398,11 +403,11 @@ Illustrative payload for a phishing typosquat, exercising the richer domain shap
       "ns": ["ns1.cheap-dns.example", "ns2.cheap-dns.example"], "mx": ["mail.cheap-dns.example"]
     },
     "whois": {
-      "registrar": "NameCheap, Inc.", "previous_registrar": null,
+      "registrar": "NameCheap, Inc.",
       "registered_by": "WhoisGuard Protected",
       "email": ["abuse@whoisguard.example"], "phone": ["+1.6613102107"]
     },
-    "spf": { "include": ["_spf.cheap-dns.example"], "a": [], "mx": [], "ip": [], "redirect": null, "exists": [] },
+    "spf": { "include": ["_spf.cheap-dns.example"], "a": [], "mx": [], "ip": [], "exists": [] },
     "links": {
       "inbound": [], "inbound_total": 0,
       "outbound": ["paypal.com", "cdn.hosting.example"], "outbound_total": 2
@@ -416,7 +421,7 @@ Illustrative payload for a phishing typosquat, exercising the richer domain shap
       "first_seen": "2026-06-30T08:14:00Z", "last_seen": "2026-07-01T22:40:00Z"
     },
     "tags": ["phishing"],
-    "coverage": { "granularity": "hostname", "shared_host": false, "data_coverage": null },
+    "coverage": { "granularity": "hostname" },
     "dedup_key": "domain|paypa1-secure.example|004",
     "unmapped_summary": "2 CT observations not mapped",
     "truncated": false
@@ -535,10 +540,11 @@ e.g. `level: HIGH` with explanation "Informational").
 > threat evidence and a non-severe level — so an allowlisted-but-compromised host (`isWhitelist`
 > + a phishing listing) correctly derives `known_bad`, not `known_good`.
 >
-> **Coverage gate — implementation limitation.** The §4.1 envelope carries
+> **Coverage gate — implementation limitation.** The §4.1 envelope defines
 > `coverage.{granularity, shared_host, data_coverage}`, but the **REST `explain()` surface exposes
 > no coverage block** (verified 2026-07-06 — it is an MCP-surface-only field), so `shared_host`
-> and `data_coverage` are emitted as `null` and **cannot gate the verdict**. The gate order above
+> and `data_coverage` are **omitted** (stripped with all nulls, §2.4) and **cannot gate the
+> verdict**. The gate order above
 > is otherwise conservative (any threat signal blocks `known_good`); the one residual case is a
 > multi-tenant apex listed *only* in trust feeds, which derives `known_good` where a coverage
 > signal would have said `unknown`. Tracked as a post-MVP refinement (a `whisper.assess`
@@ -812,9 +818,10 @@ Flagged by the research pass; to resolve before/while implementing:
    two into the same keyword/date field (§2.4 type rule).
 8. **`unknown` verdict level.** Level 3 (informational) vs 0 (suppress) is a team noise-policy
    call.
-9. **Indexer template install path.** Confirm whether 4.14.5's wazuh-indexer uses a legacy
-   `_template`, a composable index template, or component templates, so the explicit `data.whisper`
-   mapping block (§2.4) is installed correctly **before first ingest**.
+9. ~~**Indexer template install path.**~~ **Resolved (#17, 2026-07-11, verified live):** the
+   stock alerts template is **legacy** (`_template/wazuh`, order 0); ours installs as a second
+   legacy template at order 1 (merge verified). Never use a composable `_index_template` — it
+   would silently disable the stock legacy template. Full mechanics in §4.3.
 10. **IPv4/IPv6/domain `threat_feed` parity.** Issue #1 put `flags[]` under domain and `tags[]`
     under IP; this spec harmonises both types to the same `threat_feed.*` + `tags[]` shape for
     consistency and idempotency. Confirm the harmonisation is acceptable.
@@ -823,6 +830,12 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ## Change log / provenance
 
+- **v1.5 (2026-07-11):** #17 — indexer template + stringification findings (verified live).
+  §2.4 rewritten: analysisd stringifies every value (incl. `null` → the literal string
+  `"null"`), superseding the first-write-wins analysis; the connector now **strips nulls**
+  before sending (nullable fields omitted when unknown; §4.1/§4.4 examples updated); §4.3
+  replaced with the real shipped template (`whisper-template.json`, legacy order-1, coercion +
+  `ignore_malformed`, daily-roll caveat); §11 Q9 resolved.
 - **v1.4 (2026-07-06):** #15 — persistent dedup cache implemented (§7.5). Backend decided:
   **SQLite** (resolves #12 Q2), default rollback journal (single-file flush), fail-open,
   TTL-pruned, check-before-lookup / record-after-emit, sliding window. §11 Q2 marked resolved.

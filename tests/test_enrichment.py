@@ -60,32 +60,6 @@ GOOGLE_DNS_EXPLAIN = {
 }
 
 
-@pytest.fixture()
-def router(wi, monkeypatch):
-    """Route execute_query calls to canned rows; records every (cypher, params) call."""
-
-    class Router:
-        def __init__(self):
-            self.routes = []  # (substring, params_match, rows)
-            self.calls = []
-
-        def add(self, substring, rows, ioc=None):
-            self.routes.append((substring, ioc, rows))
-
-        def __call__(self, api_url, api_key, cypher, params=None, timeout=10, retries=3):
-            self.calls.append((cypher, params))
-            for substring, ioc, rows in self.routes:
-                if substring in cypher and (
-                    ioc is None or (params or {}).get('ioc', (params or {}).get('v')) == ioc
-                ):
-                    return rows if not callable(rows) else rows()
-            return []
-
-    r = Router()
-    monkeypatch.setattr(wi, 'execute_query', r)
-    return r
-
-
 def make_cfg_args():
     """(api_url, api_key, timeout, retries) for enrich()."""
     return ('https://graph.whisper.security', 'test-key', 10, 3)
@@ -352,9 +326,10 @@ class TestIpEnrichment:
         assert w['verdict'] == 'suspicious'  # evidence rules, not the raw HIGH level
         assert w['known'] is True and w['available'] is True
         assert w['level'] == 'HIGH' and w['risk_score'] == pytest.approx(7.46)
+        # null values are STRIPPED before send (analysisd would index literal "null" strings):
+        # asn.name (AS60729 has no HAS_NAME) and the always-null coverage sub-fields are absent
         assert w['asn'] == {
             'number': 60729,
-            'name': None,
             'country': 'DE',
             'reputation': {'threatDensityScore': 30},
         }
@@ -367,7 +342,8 @@ class TestIpEnrichment:
         assert w['threat_feed']['last_seen'] == '2026-07-02T19:35:16Z'
         assert set(w['threat_feed']['flags']) == {'isThreat', 'isTor', 'isSpam', 'isAnonymizer'}
         assert 'tor' in w['tags'] and 'anonymizer' in w['tags']
-        assert w['coverage'] == {'granularity': 'ipv4', 'shared_host': None, 'data_coverage': None}
+        assert w['coverage'] == {'granularity': 'ipv4'}
+        assert 'advisory' not in w and 'unmapped_summary' not in w  # nulls stripped
         assert w['graph_node_id'] == 'ipv4/185.220.101.1'
         assert w['permalink'].endswith('/ip/185.220.101.1')
         assert w['dedup_key'] == 'ipv4|185.220.101.1|001'
@@ -382,7 +358,7 @@ class TestIpEnrichment:
         payload = wi.enrich('203.0.114.9', 'ipv4', 'k', {}, *make_cfg_args())
         w = payload['whisper']
         assert w['verdict'] == 'unknown' and w['known'] is False
-        assert w['graph_node_id'] is None
+        assert 'graph_node_id' not in w  # null → stripped (would index as the string "null")
         assert 'threat_feed' not in w and 'asn' not in w  # no fragment queries for absent node
         # exactly the explain probe + the node-existence check, nothing more
         assert any('n.isThreat' in c for c, _ in router.calls)
@@ -457,10 +433,12 @@ class TestDomainEnrichment:
             'mx': ['mail.cheap-dns.example'],
         }
         assert w['whois']['registrar'] == 'NameCheap, Inc.'
-        assert w['whois']['previous_registrar'] is None  # first-writer-wins on the shared node
+        # first-writer-wins nulled previous_registrar → stripped from the payload
+        assert 'previous_registrar' not in w['whois']
         assert w['whois']['registered_by'] == 'WhoisGuard Protected'
         assert 'additional registrant org' in w['unmapped_summary']
-        assert w['spf']['include'] == ['_spf.cheap-dns.example'] and w['spf']['redirect'] is None
+        assert w['spf']['include'] == ['_spf.cheap-dns.example']
+        assert 'redirect' not in w['spf']  # null → stripped
         assert w['links'] == {
             'outbound': ['paypal.com'],
             'outbound_total': 2,

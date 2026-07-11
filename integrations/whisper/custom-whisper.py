@@ -566,7 +566,7 @@ def execute_query(
 # The procedure is multi-shape: the rich shape below on success, and a degraded shape
 # carrying error/retryAfter when the scoring backend is down. NOTE the REST layer has no
 # `coverage` field (that is an MCP-surface addition) — coverage.granularity is derived
-# from the IOC type and shared_host/data_coverage are emitted as null (documented).
+# from the IOC type; shared_host/data_coverage stay None and are stripped before send.
 _EXPLAIN_FIELDS = (
     'indicator, type, available, cached, found, score, level, '
     'explanation, factors, sources, breakdown, advisory'
@@ -925,7 +925,7 @@ def build_ip_fragments(cfg: dict, ioc: str, ioc_type: str, flags: dict, notes: '
     # related.neighbors[] (reverse RESOLVES_TO / co-hosting) is deferred graph-wide — a plain
     # reverse traversal is rejected as an unanchored 2.6B-node scan (mapping §11 Q4). It is a
     # known non-goal, not per-alert unmapped data, so it is NOT noted here (keeps
-    # unmapped_summary null for a clean IP — matching the §4.1 example).
+    # unmapped_summary absent for a clean IP — matching the §4.1 example).
     return fragments
 
 
@@ -1272,7 +1272,8 @@ def enrich(
         'graph_node_id': None,
         'source_ref': source_ref,
         # The REST layer has no coverage block (MCP-surface only): granularity is
-        # derived from the IOC type; shared_host/data_coverage are null by contract.
+        # derived from the IOC type; shared_host/data_coverage stay None here and are
+        # stripped before send (nullable fields are omitted, never JSON null — §2.4).
         'coverage': {'granularity': granularity, 'shared_host': None, 'data_coverage': None},
         'dedup_key': dedup_key,
         'unmapped_summary': None,
@@ -1314,10 +1315,30 @@ def enrich(
     whisper['verdict'] = derive_verdict(explain_row, flags, known)
     if notes:
         whisper['unmapped_summary'] = '; '.join(notes)
+    # Strip nulls BEFORE the budget check so fit_payload measures the bytes actually sent
+    # (nulls about to be deleted must not trigger spurious trimming at the boundary).
+    payload = strip_nulls(payload)
+    whisper = payload['whisper']  # strip_nulls returns new dicts — rebind before mutating
     fit_payload(payload, notes)  # may append further drop notes...
     if notes:  # ...so refresh the summary after fitting
         whisper['unmapped_summary'] = '; '.join(notes)
     return payload
+
+
+def strip_nulls(value):
+    """Recursively drop None values from the payload before it is framed.
+
+    analysisd's JSON decoder stringifies every leaf, so a JSON `null` would index as the
+    LITERAL keyword string "null" (verified live on 4.14.5 — issue #17). Nullable fields
+    (asn.name, advisory, graph_node_id, unmapped_summary, whois.*, spf.redirect, coverage.*)
+    are therefore OMITTED when unknown; empty lists are kept (stable structure, and they
+    index as no-value, not as a string).
+    """
+    if isinstance(value, dict):
+        return {k: strip_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [strip_nulls(v) for v in value if v is not None]
+    return value
 
 
 # ==========================================================================================

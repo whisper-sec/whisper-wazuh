@@ -50,6 +50,7 @@ Facts the suite must respect (verified on this stack):
 | script argv (empirical) | `argv[1]`=alert tmp file (JSON, one line) · `argv[2]`=api_key · `argv[3]`=hook_url · `argv[4]`=`debug`/`''` · `argv[5]`=options tmp file/`''` · `argv[6]`=timeout (default `10`) · `argv[7]`=retries (default `3`) — read positionally, never rely on `argc` |
 | dedup cache lives at `/var/ossec/var/whisper/dedup.db` (SQLite, normative — mapping §7.5) | **reset between stateful TCs:** `docker exec wazuh-single-node-wazuh.manager-1 rm -f /var/ossec/var/whisper/dedup.db*` — the `*` also clears any `-journal` left by a crashed mid-write; TC-01/09/12/17 start from a clean cache |
 | config knobs `api_url`, `dedup_ttl`, `dedup_scope` resolve `<options>` JSON (argv[5]) → env (`WHISPER_API_URL`/`WHISPER_DEDUP_TTL`/`WHISPER_DEDUP_SCOPE`) → default (mapping §2.3) | required implementation knobs — TC-10/TC-13 are untestable without them (§5 item 6) |
+| the indexer template (`whisper-template.json`, legacy `_template/whisper` at order 1 — mapping §4.3) applies to **new indices only**, and `wazuh-alerts-4.x-*` roll daily | install the template **before** the first enrichment TC, then delete the current day's alerts index so it re-creates typed — else `risk_score` range queries (TC-20-family) silently hit `keyword` fields |
 
 ### 1.2 Sanity check (green path, before any TC)
 
@@ -299,6 +300,10 @@ poll-based waits, ~4–6 min startup). Recommended as a follow-up job once the c
 
 ## Change log / provenance
 
+- **v1.2 (2026-07-11):** #17 alignment: §1.1 gains the indexer-template fact (install before
+  first enrichment; daily-roll caveat); note analysisd **stringifies all values** (mapping
+  §2.4) — assertions on `data.whisper.*` values in the indexer compare against *strings*
+  unless the field is typed by the template.
 - **v1.1 (2026-07-06):** scaffold alignment (#13 review + #12 Q1): vocabulary adds
   `skip reason=self-alert` and the `socket` error class; `no-ioc` semantics clarified
   (path-presence, not value-validity); TC-22 narrowed to the inactive hash/path rows
