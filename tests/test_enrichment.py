@@ -122,6 +122,52 @@ class TestHttpClient:
         wi.execute_query('u', 'k', 'MATCH (n {name: $v}) RETURN n', {'v': 'x'})
         assert captured['parameters'] == {'v': 'x'}
 
+    def test_ssl_context_uses_interpreter_default_when_populated(self, wi, monkeypatch):
+        class FakeCtx:
+            def get_ca_certs(self):
+                return [{'x': 1}]  # non-empty → default is fine, no fallback
+
+        monkeypatch.setattr(wi.ssl, 'create_default_context', lambda: FakeCtx())
+        assert isinstance(wi._ssl_context(), FakeCtx)
+
+    def test_ssl_context_loads_bundle_when_default_empty(self, wi, tmp_path, monkeypatch):
+        """Wazuh framework Python: default context has zero CAs → load a real bundle,
+        keeping verification ON (scope §3.8)."""
+        bundle = tmp_path / 'ca.crt'
+        bundle.write_text('-----BEGIN CERTIFICATE-----')
+        loaded = []
+
+        class FakeCtx:
+            def get_ca_certs(self):
+                return loaded  # empty until a bundle is loaded, then non-empty (real behavior)
+
+            def load_verify_locations(self, path):
+                loaded.append(path)
+
+        monkeypatch.setattr(wi.ssl, 'create_default_context', lambda: FakeCtx())
+        monkeypatch.setattr(wi, '_CA_BUNDLE_CANDIDATES', (str(bundle),))
+        monkeypatch.delenv('SSL_CERT_FILE', raising=False)
+        wi._ssl_context()
+        assert loaded == [str(bundle)]  # located and loaded the bundle
+
+    def test_ssl_context_prefers_ssl_cert_file_env(self, wi, tmp_path, monkeypatch):
+        env_bundle = tmp_path / 'env-ca.crt'
+        env_bundle.write_text('x')
+        loaded = []
+
+        class FakeCtx:
+            def get_ca_certs(self):
+                return loaded
+
+            def load_verify_locations(self, path):
+                loaded.append(path)
+
+        monkeypatch.setattr(wi.ssl, 'create_default_context', lambda: FakeCtx())
+        monkeypatch.setattr(wi, '_CA_BUNDLE_CANDIDATES', ('/nonexistent/ca.crt',))
+        monkeypatch.setenv('SSL_CERT_FILE', str(env_bundle))
+        wi._ssl_context()
+        assert loaded == [str(env_bundle)]  # SSL_CERT_FILE wins over the well-known paths
+
     def test_http_exception_stays_in_taxonomy(self, wi, monkeypatch):
         """BadStatusLine/IncompleteRead are not OSError — must not escape as a raw crash."""
         import http.client

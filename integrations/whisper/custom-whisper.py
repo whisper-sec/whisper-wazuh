@@ -26,6 +26,7 @@ import os
 import re
 import socket
 import sqlite3
+import ssl
 import sys
 import time
 import urllib.error
@@ -473,13 +474,50 @@ def build_source_ref(alert: dict, field_path: str) -> dict:
 API_QUERY_PATH = '/api/query'
 BACKOFF_BASE = 0.5
 BACKOFF_CAP = 60.0
+# Common CA-bundle locations, tried when the interpreter's compiled-in paths are empty.
+# The Wazuh framework Python's default verify paths point at /usr/local/ssl/cert.pem (absent),
+# so create_default_context() loads zero CAs and TLS verification would always fail. We keep
+# verification ON (scope §3.8) and locate a real bundle instead.
+_CA_BUNDLE_CANDIDATES = (
+    '/etc/ssl/certs/ca-certificates.crt',  # Debian/Ubuntu (Wazuh manager image)
+    '/etc/pki/tls/certs/ca-bundle.crt',  # RHEL/CentOS
+    '/etc/ssl/cert.pem',  # Alpine/BSD
+)
+
+
+def _ssl_context() -> 'ssl.SSLContext':
+    """A verifying TLS context that actually has CAs loaded, wherever the bundle lives.
+
+    Resolution: the interpreter default → `SSL_CERT_FILE` → well-known bundle paths → the
+    bundled `certifi` (ships with the framework Python). Verification stays ON throughout.
+    """
+    ctx = ssl.create_default_context()
+    if ctx.get_ca_certs():
+        return ctx
+    candidates = [os.environ.get('SSL_CERT_FILE'), *_CA_BUNDLE_CANDIDATES]
+    for path in candidates:
+        if path and os.path.exists(path):
+            try:
+                ctx.load_verify_locations(path)
+            except (ssl.SSLError, OSError):
+                continue
+            if ctx.get_ca_certs():  # an empty/placeholder PEM loads 0 certs without raising
+                return ctx
+    try:
+        import certifi  # bundled with the Wazuh framework Python; last-resort only
+
+        ctx.load_verify_locations(certifi.where())
+    except (ImportError, ssl.SSLError, OSError):
+        pass  # nothing found — verification will fail loudly (better than silently trusting all)
+    return ctx
 
 
 def _http_post(url: str, body: dict, headers: dict, timeout: int) -> 'tuple[int, bytes, dict]':
     """Thin transport seam (tests monkeypatch this). Returns (status, raw, lower-cased headers)."""
     req = urllib.request.Request(url, data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
+    ctx = _ssl_context() if url.startswith('https') else None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — https URL from config
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310 — https URL from config
             return resp.status, resp.read(), {k.lower(): v for k, v in resp.headers.items()}
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(), {k.lower(): v for k, v in (exc.headers or {}).items()}
