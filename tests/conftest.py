@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parent.parent / 'integrations' / 'whisper' / 'custom-whisper.py'
+_WHISPER_DIR = Path(__file__).resolve().parent.parent / 'integrations' / 'whisper'
+_SCRIPT = _WHISPER_DIR / 'custom-whisper.py'
+_LOGS_SCRIPT = _WHISPER_DIR / 'whisper-logs.py'
 
 
 def _load_module():
@@ -19,6 +21,14 @@ def _load_module():
     module = importlib.util.module_from_spec(spec)
     sys.modules['whisper_integration'] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def _load_logs_module():
+    spec = importlib.util.spec_from_file_location('whisper_logs', _LOGS_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['whisper_logs'] = module
+    spec.loader.exec_module(module)  # reuses sys.modules['whisper_integration'] as its `w`
     return module
 
 
@@ -88,6 +98,44 @@ def log_lines(wi):
         return path.read_text().splitlines() if path.exists() else []
 
     return _read
+
+
+@pytest.fixture()
+def wl(wi, tmp_path, monkeypatch):
+    """The whisper-logs poller isolated for a test.
+
+    Depends on `wi` so the SAME enrichment module (`whisper_integration`) is loaded, isolated
+    (KEY_FILE/DEDUP_DB in tmp, no network) FIRST — the logs module reuses it as its `w`, so the
+    existing `router` fixture (which patches `wi.execute_query`) also routes the poller's calls.
+    All logs paths point into tmp; WHISPER_LOGS_* env is cleared.
+    """
+    module = _load_logs_module()
+    monkeypatch.setattr(module, 'LOG_FILE', str(tmp_path / 'whisper-logs.log'))
+    monkeypatch.setattr(module, 'SPOOL_DEFAULT', str(tmp_path / 'whisper-agent-activity.json'))
+    monkeypatch.setattr(module, 'CURSOR_DEFAULT', str(tmp_path / 'whisper' / 'logs-cursor'))
+    for var in (
+        'WHISPER_LOGS_SINK',
+        'WHISPER_LOGS_SPOOL',
+        'WHISPER_LOGS_CURSOR',
+        'WHISPER_LOGS_LIMIT',
+        'WHISPER_LOGS_AGENT',
+        'WHISPER_LOGS_KINDS',
+    ):
+        monkeypatch.delenv(var, raising=False)
+    module._test_log_file = tmp_path / 'whisper-logs.log'
+    module._tmp_path = tmp_path
+    return module
+
+
+@pytest.fixture()
+def load_fixture():
+    """Load a tests/fixtures/<name> JSON file."""
+    fixtures = Path(__file__).resolve().parent / 'fixtures'
+
+    def _load(name):
+        return json.loads((fixtures / name).read_text())
+
+    return _load
 
 
 def _make_alert(**overrides):

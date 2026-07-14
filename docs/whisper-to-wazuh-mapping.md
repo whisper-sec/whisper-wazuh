@@ -831,8 +831,121 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ---
 
+## 12. Log source — agent activity → Wazuh (keyed tier, #35)
+
+§1–§11 above describe the **graph-enrichment** connector (`custom-whisper`) — intel pulled
+INTO Wazuh, keyless/graph tier. This section describes the second, independent surface: the
+**agent-activity log source** (`whisper-logs`), the **keyed tier** of the RULE-14 two-tier
+design. It reads the caller's OWN tenant activity logs OUT of the Whisper control plane and
+feeds them to the manager as decoded `data.whisper_agent.*` alerts. It requires the tenant API
+key (the same key + endpoint enrichment already uses) and **leaves enrichment untouched** —
+`whisper-logs.py` reuses the enrichment module's Whisper client, auth, config, dedup DB, and
+socket helpers via `importlib` (one client, one dedup DB), adding no second copy.
+
+### 12.1 The `op:logs` contract (live-verified 2026-07-14)
+
+Source: `POST https://graph.whisper.security/api/query`, body
+`{"query":"CALL whisper.agents({op:'logs', args:{from:<epoch-ms>, limit:<n>}})"}`, tenant key
+in `X-API-Key`. The task's original assumed record shape was idealized and wrong in three ways;
+the live contract is:
+
+- **Outer proxy envelope** — `columns=[op,ok,status,result,error,retry_after]`,
+  `rows=[{op,ok,status,result,error,retry_after}]`. `execute_query()` is transport-compatible
+  (no top-level `success`; it returns the OUTER `rows`). The log source unwraps `rows[0]`,
+  mapping the inner `status` onto the enrichment error taxonomy (401/403 → auth-terminal,
+  429/5xx → transport, other ≥400/`ok:false` → query).
+- **Inner `result` is COLUMNAR** — `result.columns` + `result.rows` (array-of-arrays). A record
+  is `dict(zip(columns, row))`; unused columns are `null` per kind. Columns:
+  `ts, kind, qname, qtype, rcode, decision, source, answer, latency_ms, agent, peer, bytes_up,
+  bytes_down, duration_ms, reason, client_src, packets_up, packets_down`.
+- **`ts` is epoch-MILLISECONDS** (int, e.g. `1784002495932`), not ISO.
+- **Rows carry only a bare `agent` id** (e.g. `a98874349306a52c8`) — **no `/128`, no fqdn**.
+  Address/fqdn resolve separately via `op:identity` (also columnar: `address,fqdn,ptr,state`),
+  cached per poll; identity failures degrade to an id-only alert, never abort the poll.
+
+Per-kind populated columns (verified against real rows):
+
+| kind  | populated columns |
+|-------|-------------------|
+| dns   | `qname, qtype, rcode, decision(allow\|refused), source, answer, latency_ms, agent` |
+| conn  | `peer(host:port), reason(open\|closed), bytes_up/down, packets_up/down, duration_ms, client_src(reduced subnet), agent` |
+| alloc | `ts, kind, agent` only (address/fqdn via `op:identity`) |
+
+### 12.2 The `from` watermark & incremental cursor
+
+`from` is the **only** working filter (inclusive lower bound) — the task-assumed `since` arg is
+**silently ignored** and `to` did **not** filter (both verified live). Results are returned
+**newest-first (descending)**, so classic forward multi-page draining is impossible with a
+lower-bound-only API; the poller therefore does **one request per poll** (`from:<cursor>,
+limit:N`), emits every returned row, and advances the cursor to `max(ts)+1`. If a poll returns
+exactly `limit` rows the window may have been truncated (older rows missed) — the poller logs a
+loud gap warning recommending a larger `WHISPER_LOGS_LIMIT` (cap 10000) or a shorter interval.
+The cursor is persisted at `/var/ossec/var/whisper/logs-cursor` (`{"from":<epoch-ms>}`,
+written atomically) — the native-equivalent checkpoint, like the azure/aws wodles' state files.
+
+Because `from` is inclusive and several events share a millisecond, rows on the boundary are
+re-fetched next poll; a composite-key dedup (`agent|ts|kind|(qname\|peer)|(decision\|reason)`)
+in a **new `logs_seen` table inside the existing `dedup.db`** (reusing `_dedup_connect()`,
+busy-timeout, fail-open) suppresses the re-emit across the boundary and across poller restarts.
+`logs_seen` rows are pruned once they fall a retention window below the cursor.
+
+### 12.3 Ingest path & the two sinks
+
+- **PRIMARY (`WHISPER_LOGS_SINK=logcollector`, default):** the poller appends one JSON object
+  per line — `{"integration":"whisper-logs","whisper_agent":{…}}` — to the NDJSON spool
+  `/var/ossec/logs/whisper-agent-activity.json`; a `<localfile><log_format>json</log_format>`
+  stanza tails it and analysisd's JSON decoder flattens it to `data.whisper_agent.*` (exactly
+  how enrichment lands `data.whisper.*`). No location-framing/escaping.
+- **ALTERNATIVE (`WHISPER_LOGS_SINK=socket`):** reuses the enrichment `send_event()` machinery
+  to inject each event on the analysisd queue socket (the JSON `integration` field, not the
+  cosmetic location prefix, is what the rules match).
+- **Scheduler:** a self-contained `<wodle name="command">` runs the poller every 60s with
+  `ignore_output` (the poller writes only to the spool + its own log, never stdout, so the
+  scheduler ingests no event of its own). A systemd timer is an equivalent alternative.
+
+### 12.4 Field mapping (columnar record → `data.whisper_agent.*`)
+
+Common: `ts→ts_ms` (long epoch-ms) **and** `ts` (ISO-8601 UTC, derived); `kind→kind` (drives
+the rule); `agent→agent_id`, plus `address`(/128) + `fqdn` from cached `op:identity`;
+`decision→decision`. dns: `qname/qtype/rcode/source/answer/latency_ms→dns.*`. conn:
+`peer→conn.dst` (+ split `conn.dst_host`/`conn.dst_port`), `reason→conn.state`,
+`bytes_up/bytes_down/packets_up/packets_down/duration_ms→conn.*`, `client_src→conn.client_src`.
+alloc: `address/fqdn` from `op:identity`. Nulls are stripped before send (same reason as §2.4 —
+analysisd would index a JSON `null` as the literal string `"null"`).
+
+### 12.5 Rules & the loop guard
+
+`whisper_agent_rules.xml`, ids **100210–100249**, group `whisper,whisper_agent_activity,`
+(disjoint from the enrichment `whisper_enrichment` group and its 100200–100209 band). Base
+**100210** (level 0): `decoded_as json` + `integration ^whisper-logs$`. Children key on
+`whisper_agent.kind`/`decision` (no `data.` prefix, pcre2-anchored): **100211** dns
+`decision=refused` → level 6 (policy block); **100212** dns `decision=allow` → level 3 (info;
+set level 0 to suppress the noise); **100213** conn → level 3; **100214** alloc → level 4. The
+`whisper_agent_activity` token is in **no** `<integration>` trigger filter, and the poller
+writes to its own spool/socket (not via integratord), so these alerts can never form a
+feedback loop.
+
+### 12.6 Config keys (key via env/keyfile only, REDACTED)
+
+Reuses `WHISPER_API_KEY` (env → `/var/ossec/etc/whisper.key` → argv) and `WHISPER_API_URL`.
+New: `WHISPER_LOGS_SINK` (`logcollector`|`socket`, default `logcollector`), `WHISPER_LOGS_SPOOL`
+(default `/var/ossec/logs/whisper-agent-activity.json`), `WHISPER_LOGS_CURSOR` (default
+`/var/ossec/var/whisper/logs-cursor`), `WHISPER_LOGS_LIMIT` (default 1000, cap 10000),
+`WHISPER_LOGS_AGENT` (optional filter, validated `^(agent-)?a?[0-9a-f]+$` before it is inlined),
+`WHISPER_LOGS_KINDS` (default all). `from`/`limit` are ints → injection-safe by construction;
+the agent filter is regex-validated before it is bound. **The API key is never written to any
+committed file, sample, or ossec.conf** (it would leak into the wodle child's `/proc` cmdline);
+it resolves at runtime only.
+
+---
+
 ## Change log / provenance
 
+- **v1.6 (2026-07-14):** #35 — added §12 (agent-activity **log source**, keyed tier). Documents
+  the live-verified columnar `op:logs` contract (epoch-ms `ts`, bare `agent` id, no `/128`/fqdn),
+  the `from`-only watermark (the assumed `since`/`to` do not filter), the single-shot descending
+  poll + `logs_seen` dedup, the two sinks (json localfile default / analysisd socket), the
+  `data.whisper_agent.*` mapping, and rules 100210–100214. §1–§11 (enrichment) unchanged.
 - **v1.5 (2026-07-11):** #17 — indexer template + stringification findings (verified live).
   §2.4 rewritten: analysisd stringifies every value (incl. `null` → the literal string
   `"null"`), superseding the first-write-wins analysis; the connector now **strips nulls**

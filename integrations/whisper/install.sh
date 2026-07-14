@@ -12,13 +12,18 @@
 # an existing managed block is removed and re-rendered with the current flags.
 #
 # Usage:
-#   install.sh [--group <csv>] [--dev] [--skip-template] [--refresh-index]
+#   install.sh [--group <csv>] [--dev] [--logs] [--skip-template] [--refresh-index]
 #              [--indexer-url URL] [--indexer-user USER] [--indexer-pass PASS]
 #
 #   --group <csv>     Rule groups that trigger enrichment (default: sshd). NEVER level-only,
 #                     and never a group the enrichment alerts themselves carry (loop guard).
 #   --dev             Dev mode: also install whisper_test_rules.xml and add the whisper_test
 #                     group to the trigger filter (domain-TC mechanism).
+#   --logs            Also install the whisper.online agent-activity LOG SOURCE (the keyed
+#                     tier): whisper-logs poller + whisper_agent_rules.xml + a self-contained
+#                     json-localfile spool and a 60s command-wodle scheduler (managed in a
+#                     SEPARATE whisper-logs:begin/end block). Additive — leaves enrichment
+#                     identical. Needs the tenant API key in the same whisper.key / env.
 #   --skip-template   Skip the indexer template PUT (install _template/whisper yourself
 #                     before the first enrichment alert — mapping spec section 4.3).
 #   --refresh-index   DEV ONLY (requires --dev): delete the current day's alerts index so it
@@ -41,9 +46,13 @@ KEY_FILE="$WAZUH_PATH/etc/whisper.key"
 PLACEHOLDER="WHISPER_API_KEY_PLACEHOLDER"
 MARKER_BEGIN="whisper-integration:begin"
 MARKER_END="whisper-integration:end"
+LOGS_MARKER_BEGIN="whisper-logs:begin"
+LOGS_MARKER_END="whisper-logs:end"
+LOGS_SPOOL="$WAZUH_PATH/logs/whisper-agent-activity.json"
 
 GROUPS_CSV="sshd"
 DEV_MODE=0
+LOGS_MODE=0
 SKIP_TEMPLATE=0
 REFRESH_INDEX=0
 INDEXER_URL_ARG="$(printf '%s' "${INDEXER_URL:-https://localhost:9200}" | tr -d '"')"
@@ -76,6 +85,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --group)         GROUPS_CSV="$2"; shift 2 ;;
         --dev)           DEV_MODE=1; shift ;;
+        --logs)          LOGS_MODE=1; shift ;;
         --skip-template) SKIP_TEMPLATE=1; shift ;;
         --refresh-index) REFRESH_INDEX=1; shift ;;
         --indexer-url)   INDEXER_URL_ARG="$2"; shift 2 ;;
@@ -93,6 +103,7 @@ done
 
 REQUIRED="custom-whisper custom-whisper.py whisper_rules.xml whisper-template.json"
 [ "$DEV_MODE" = "1" ] && REQUIRED="$REQUIRED whisper_test_rules.xml"
+[ "$LOGS_MODE" = "1" ] && REQUIRED="$REQUIRED whisper-logs whisper-logs.py whisper_agent_rules.xml"
 for f in $REQUIRED; do
     [ -f "$SRC_DIR/$f" ] || fail "source file missing: $SRC_DIR/$f"
 done
@@ -134,12 +145,24 @@ log "installing integration script -> $WAZUH_PATH/integrations/"
 cp "$SRC_DIR/custom-whisper" "$SRC_DIR/custom-whisper.py" "$WAZUH_PATH/integrations/" || fail "cp integration script failed"
 chown root:wazuh "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py"
 chmod 750 "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py"
+if [ "$LOGS_MODE" = "1" ]; then
+    log "installing log-source poller -> $WAZUH_PATH/integrations/whisper-logs[.py]"
+    cp "$SRC_DIR/whisper-logs" "$SRC_DIR/whisper-logs.py" "$WAZUH_PATH/integrations/" || fail "cp whisper-logs failed"
+    chown root:wazuh "$WAZUH_PATH/integrations/whisper-logs" "$WAZUH_PATH/integrations/whisper-logs.py"
+    chmod 750 "$WAZUH_PATH/integrations/whisper-logs" "$WAZUH_PATH/integrations/whisper-logs.py"
+fi
 
 # ---- 2. rules (660 root:wazuh) --------------------------------------------------------
 log "installing whisper_rules.xml -> $WAZUH_PATH/etc/rules/"
 cp "$SRC_DIR/whisper_rules.xml" "$WAZUH_PATH/etc/rules/whisper_rules.xml" || fail "cp whisper_rules.xml failed"
 chown root:wazuh "$WAZUH_PATH/etc/rules/whisper_rules.xml"
 chmod 660 "$WAZUH_PATH/etc/rules/whisper_rules.xml"
+if [ "$LOGS_MODE" = "1" ]; then
+    log "installing whisper_agent_rules.xml -> $WAZUH_PATH/etc/rules/"
+    cp "$SRC_DIR/whisper_agent_rules.xml" "$WAZUH_PATH/etc/rules/whisper_agent_rules.xml" || fail "cp whisper_agent_rules.xml failed"
+    chown root:wazuh "$WAZUH_PATH/etc/rules/whisper_agent_rules.xml"
+    chmod 660 "$WAZUH_PATH/etc/rules/whisper_agent_rules.xml"
+fi
 if [ "$DEV_MODE" = "1" ]; then
     log "dev mode: installing whisper_test_rules.xml (domain-TC trigger)"
     cp "$SRC_DIR/whisper_test_rules.xml" "$WAZUH_PATH/etc/rules/whisper_test_rules.xml" || fail "cp whisper_test_rules.xml failed"
@@ -162,6 +185,14 @@ log "creating dedup cache dir $DEDUP_DIR ($LOG_OWNER, 0770)"
 mkdir -p "$DEDUP_DIR" || fail "cannot create $DEDUP_DIR"
 chown "$LOG_OWNER" "$DEDUP_DIR" 2>/dev/null || chown wazuh:wazuh "$DEDUP_DIR"
 chmod 770 "$DEDUP_DIR"
+
+# ---- 3c. log-source spool (logcollector tails it; create it so it is picked up at once) ---
+if [ "$LOGS_MODE" = "1" ]; then
+    log "creating log-source spool $LOGS_SPOOL ($LOG_OWNER, 0660)"
+    [ -f "$LOGS_SPOOL" ] || : > "$LOGS_SPOOL" || fail "cannot create $LOGS_SPOOL"
+    chown "$LOG_OWNER" "$LOGS_SPOOL" 2>/dev/null || chown wazuh:wazuh "$LOGS_SPOOL"
+    chmod 660 "$LOGS_SPOOL"
+fi
 
 # ---- 4. ossec.conf: back up, then remove-any-old-block + re-render (drift-safe) -------
 BACKUP="$OSSEC_CONF.pre-whisper.$(date +%Y%m%d%H%M%S)"
@@ -187,6 +218,42 @@ sed "/$MARKER_BEGIN/,/$MARKER_END/d" "$OSSEC_CONF" | awk -v groups="$FILTER_GROU
 ' > "$TMP_CONF" || fail "no standalone </ossec_config> line in ossec.conf — patch aborted (nothing changed)"
 grep -q "$MARKER_BEGIN" "$TMP_CONF" || fail "patch render failed"
 
+# ---- 4b. log-source block: a SEPARATE managed marker block (json localfile + command wodle) --
+# Independent of the enrichment <integration> block above; strip any stale one, then insert a
+# fresh one before the FIRST standalone </ossec_config>. The wodle runs the poller every 60s
+# and ignores its output (the poller writes only to the spool, never stdout) so the scheduler
+# ingests no event of its own; the json localfile tails the spool the poller writes.
+if [ "$LOGS_MODE" = "1" ]; then
+    TMP_CONF2="$WAZUH_PATH/tmp/ossec.conf.whisperlogs.$$"
+    sed "/$LOGS_MARKER_BEGIN/,/$LOGS_MARKER_END/d" "$TMP_CONF" | awk \
+        -v poller="$WAZUH_PATH/integrations/whisper-logs" -v spool="$LOGS_SPOOL" '
+        /^[[:space:]]*<\/ossec_config>[[:space:]]*$/ && !ins {
+            print "  <!-- whisper-logs:begin (managed by install.sh - do not edit inside) -->"
+            print "  <localfile>"
+            print "    <log_format>json</log_format>"
+            print "    <location>" spool "</location>"
+            print "  </localfile>"
+            print "  <wodle name=\"command\">"
+            print "    <disabled>no</disabled>"
+            print "    <tag>whisper-logs</tag>"
+            print "    <command>" poller "</command>"
+            print "    <interval>60s</interval>"
+            print "    <ignore_output>yes</ignore_output>"
+            print "    <run_on_start>yes</run_on_start>"
+            print "    <timeout>50</timeout>"
+            print "  </wodle>"
+            print "  <!-- whisper-logs:end -->"
+            ins = 1
+        }
+        { print }
+        END { if (!ins) exit 3 }
+    ' > "$TMP_CONF2" || fail "no standalone </ossec_config> line for the log-source block — aborted"
+    grep -q "$LOGS_MARKER_BEGIN" "$TMP_CONF2" || fail "log-source block render failed"
+    cat "$TMP_CONF2" > "$TMP_CONF"
+    rm -f "$TMP_CONF2"
+    log "log-source block rendered (poller: $WAZUH_PATH/integrations/whisper-logs, 60s)"
+fi
+
 # Arm rollback around the in-place write (a truncated ossec.conf breaks the manager).
 ROLLBACK_CONF="$BACKUP"
 cat "$TMP_CONF" > "$OSSEC_CONF" || fail "failed writing ossec.conf"
@@ -208,6 +275,11 @@ while [ $tries -lt 15 ]; do
     if tail -n "+$((LOG_LINES_BEFORE + 1))" "$LOG" 2>/dev/null | grep -q "Enabling integration for: 'custom-whisper'"; then
         log "OK — integratord: Enabling integration for: 'custom-whisper'"
         log "install complete. Trigger groups: $FILTER_GROUPS"
+        if [ "$LOGS_MODE" = "1" ]; then
+            log "log source installed: whisper-logs poller (60s wodle) -> $LOGS_SPOOL -> logcollector"
+            log "  rules: whisper_agent_rules.xml (100210-100214). Ensure the tenant API key is set"
+            log "  (WHISPER_API_KEY env for the manager, or $KEY_FILE) so op:logs can authenticate."
+        fi
         if grep -q "$PLACEHOLDER" "$KEY_FILE" 2>/dev/null; then
             log "NOTE: $KEY_FILE still holds the placeholder — enrichment will fail auth until you put a real key in it (640 root:wazuh)"
         fi
