@@ -73,6 +73,11 @@ API_KEY_PLACEHOLDER = 'WHISPER_API_KEY_PLACEHOLDER'
 DEFAULT_API_URL = 'https://graph.whisper.security'
 DEFAULT_DEDUP_TTL = 3600  # seconds — mapping §7.4
 DEFAULT_DEDUP_SCOPE = 'endpoint'  # 'endpoint' (key includes agent_id) | 'org' — mapping §7.2
+# Opt-in Tier-2 enrichments (#32). Each adds a query and/or has narrow, single-purpose
+# coverage, so all default OFF and are enabled individually via <options>.extra_enrichments.
+# tls_fingerprint: (ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT) — a Cobalt-Strike-default
+# JARM emitted only when present (a frozen, sparse catalog; absence is never rendered).
+KNOWN_EXTRA_ENRICHMENTS = frozenset({'tls_fingerprint'})
 
 # --- IOC extraction table (mapping §9, validated by issue #12 Q1 on 2026-07-06) ---------
 # One table, one row per path: (full dotted path from the alert root, hint, status).
@@ -266,6 +271,31 @@ def resolve_dedup_scope(options: dict, environ: dict) -> bool:
             if scope == 'endpoint':
                 return True
     return DEFAULT_DEDUP_SCOPE == 'endpoint'
+
+
+def resolve_extra_enrichments(options: dict, environ: dict) -> 'frozenset[str]':
+    """The opt-in Tier-2 enrichments to run, intersected with KNOWN_EXTRA_ENRICHMENTS (#32).
+
+    <options>.extra_enrichments (JSON list, or comma string) → WHISPER_EXTRA_ENRICHMENTS
+    (comma-separated) → default none. Unknown names are ignored — a typo silently disables
+    the feature, never errors the run.
+
+    A PRESENT `extra_enrichments` key is authoritative regardless of shape: a valid list/string
+    is parsed, a malformed value (dict/int/bool) means "no extras" — it must NOT silently fall
+    through to the env var (that would let a config typo be overridden by a stale environment).
+    Only an ABSENT key falls through to the environment.
+    """
+    if 'extra_enrichments' in options:
+        raw = options['extra_enrichments']
+        if isinstance(raw, (list, tuple)):
+            names = [str(x) for x in raw]
+        elif isinstance(raw, str):
+            names = raw.split(',')
+        else:
+            names = []  # present but malformed → no extras (do not defer to env)
+    else:
+        names = environ.get('WHISPER_EXTRA_ENRICHMENTS', '').split(',')
+    return frozenset(n.strip() for n in names if n.strip()) & KNOWN_EXTRA_ENRICHMENTS
 
 
 def resolve_api_key(argv_key: str, environ: dict, key_file: 'str | None' = None) -> 'str | None':
@@ -994,6 +1024,47 @@ def _prefix_threat(ctx: dict) -> 'dict | None':
     return out or None
 
 
+# Opt-in Tier-2 (#32): TLS-fingerprint clustering. Verified live 2026-07-12 that 100% of
+# EMITS_TLS_FINGERPRINT edges resolve to jarm/cobalt-strike-default, and ~97% of emitters read
+# clean in the threat feeds — so this catches C2 the feed layer misses. The two hops MUST be
+# split by `WITH t`: a single (ip)-[..]->(t)<-[..]-(co) pattern silently returns 0 rows. Emitted
+# only when the edge exists (the catalog is a frozen, sparse snapshot — never render absence).
+_Q_TLS_FINGERPRINT = (
+    'MATCH (ip:IPV4 {name: $v})-[:EMITS_TLS_FINGERPRINT]->(t:TLS_FINGERPRINT) '
+    'WITH t '
+    'MATCH (t)<-[:EMITS_TLS_FINGERPRINT]-(co:IPV4) '
+    'RETURN t.name AS fingerprint, t.kind AS kind, t.family AS family, '
+    'count(DISTINCT co) AS cluster_size ORDER BY cluster_size DESC'
+)
+
+
+def build_tls_fragment(cfg: dict, ioc: str) -> 'dict | None':
+    """TLS-fingerprint cluster for an IPv4, or None when the IP emits no fingerprint (#32).
+
+    `cluster_size` = how many IPs share this fingerprint — NOT a count of known-bad hosts
+    (co-emitters carry no independent feed signal; they are fellow-suspected CS servers by the
+    same JARM). `family` (e.g. cobalt-strike-default) is the actionable label a rule keys on.
+    """
+    rows = execute_query(
+        cfg['api_url'], cfg['api_key'], _Q_TLS_FINGERPRINT, {'v': ioc}, cfg['timeout'], cfg['retries']
+    )
+    if not rows:
+        return None
+    top = rows[0]
+    tls: dict = {}
+    if top.get('fingerprint'):
+        tls['fingerprint'] = top['fingerprint']
+    if top.get('kind'):
+        tls['kind'] = top['kind']
+    if top.get('family'):
+        tls['family'] = top['family']
+    if isinstance(top.get('cluster_size'), int):
+        tls['cluster_size'] = top['cluster_size']
+    if len(rows) > 1:  # IP emits multiple fingerprints — surface the top, note the rest
+        tls['count'] = len(rows)
+    return tls or None
+
+
 def build_ip_fragments(cfg: dict, ioc: str, ioc_type: str, flags: dict, notes: 'list[str]') -> dict:
     cypher = _Q_IP_CONTEXT_V4 if ioc_type == 'ipv4' else _Q_IP_CONTEXT_V6
     rows = execute_query(cfg['api_url'], cfg['api_key'], cypher, {'v': ioc}, cfg['timeout'], cfg['retries'])
@@ -1035,6 +1106,15 @@ def build_ip_fragments(cfg: dict, ioc: str, ioc_type: str, flags: dict, notes: '
         fragments['prefix_threat'] = prefix_threat
     if geo:
         fragments['geo'] = geo
+    # Opt-in TLS fingerprint (#32) — own try so a failure never drops asn/prefix/geo above.
+    # IPv4 only (all EMITS_TLS_FINGERPRINT edges are on IPV4). Auth errors still propagate.
+    if ioc_type == 'ipv4' and 'tls_fingerprint' in cfg.get('extra', frozenset()):
+        try:
+            tls = build_tls_fragment(cfg, ioc)
+            if tls:
+                fragments['tls'] = tls
+        except (WhisperTransportError, WhisperQueryError):
+            notes.append('tls fingerprint lookup failed')
     # related.neighbors[] (reverse RESOLVES_TO / co-hosting) is deferred graph-wide — a plain
     # reverse traversal is rejected as an unanchored 2.6B-node scan (mapping §11 Q4). It is a
     # known non-goal, not per-alert unmapped data, so it is NOT noted here (keeps
@@ -1362,6 +1442,7 @@ def enrich(
     api_key: 'str | None',
     timeout: int,
     retries: int,
+    extra: 'frozenset[str]' = frozenset(),
 ) -> dict:
     """Build the full injection payload ({'integration': ..., 'whisper': {...}}) for one IOC.
 
@@ -1371,7 +1452,7 @@ def enrich(
     rather than discarding an already-computed verdict (auth errors still terminate). The
     whole datagram respects the 60 KB socket budget.
     """
-    cfg = {'api_url': api_url, 'api_key': api_key, 'timeout': timeout, 'retries': retries}
+    cfg = {'api_url': api_url, 'api_key': api_key, 'timeout': timeout, 'retries': retries, 'extra': extra}
     notes: list[str] = []
     trunc: list[str] = []
 
@@ -1637,6 +1718,7 @@ def main(args: 'list[str]') -> int:
     api_url = resolve_api_url(options, os.environ)
     dedup_ttl = resolve_dedup_ttl(options, os.environ)
     include_agent = resolve_dedup_scope(options, os.environ)
+    extra = resolve_extra_enrichments(options, os.environ)
     api_key = resolve_api_key(args[APIKEY_INDEX] if len(args) > APIKEY_INDEX else '', os.environ)
     timeout = _argv_int(args, TIMEOUT_INDEX, DEFAULT_TIMEOUT)
     retries = _argv_int(args, RETRIES_INDEX, DEFAULT_RETRIES)
@@ -1652,7 +1734,8 @@ def main(args: 'list[str]') -> int:
             continue
         try:
             payload = enrich(
-                ioc, ioc_type, key, build_source_ref(alert, field_path), api_url, api_key, timeout, retries
+                ioc, ioc_type, key, build_source_ref(alert, field_path),
+                api_url, api_key, timeout, retries, extra,
             )
             sent = send_event(payload, alert.get('agent'))
             record_dedup(key, dedup_ttl)  # only after a successful emit — failures stay retryable

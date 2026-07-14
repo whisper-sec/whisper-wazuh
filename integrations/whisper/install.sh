@@ -100,7 +100,7 @@ mkdir -p "$WAZUH_PATH/tmp" || fail "cannot create $WAZUH_PATH/tmp"
 
 # Loop guard: the trigger filter must never watch a group the enrichment alerts carry
 # (mapping section 8; the emitted rules sit in whisper,whisper_enrichment,whisper_<verdict>).
-EMITTED_GROUPS="whisper whisper_enrichment whisper_known_bad whisper_suspicious whisper_known_good whisper_unknown"
+EMITTED_GROUPS="whisper whisper_enrichment whisper_known_bad whisper_suspicious whisper_known_good whisper_unknown whisper_c2"
 for token in $(printf '%s' "$GROUPS_CSV" | tr ',' ' '); do
     for emitted in $EMITTED_GROUPS; do
         [ "$token" = "$emitted" ] && fail "--group '$token' would create a feedback loop (enrichment alerts carry that group)"

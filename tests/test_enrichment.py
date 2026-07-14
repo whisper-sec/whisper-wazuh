@@ -267,6 +267,44 @@ class TestFragmentDegradation:
         with pytest.raises(wi.WhisperAuthError):
             wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())
 
+    def _wire_tor_ip(self, router, belongs):
+        router.add('CALL explain', [TOR_EXPLAIN], ioc='185.220.101.1')
+        router.add('CALL explain', [{'available': True, 'found': True, 'breakdown': None}], ioc='AS60729')
+        router.add('RETURN n.isThreat', [TOR_FLAGS])
+        router.add('BELONGS_TO', [belongs])
+
+    def test_tls_failure_keeps_core_fragments(self, wi, router, monkeypatch):
+        """#32: an opt-in TLS query failure degrades with a note and NEVER drops the core
+        asn/prefix/geo fragments or the verdict (its own try, after the core is built)."""
+        self._wire_tor_ip(router, {
+            'prefix': '185.220.101.0/24', 'asn': 'AS60729', 'asn_name': None,
+            'asn_country': 'DE', 'country': 'DE', 'city': None,
+            'prefix_threat_level': 'CRITICAL', 'prefix_threat_score': 14,
+            'prefix_is_threat': True, 'prefix_threat_neighbors': 3,
+        })
+        monkeypatch.setattr(wi, 'build_tls_fragment',
+                            lambda *a, **k: (_ for _ in ()).throw(wi.WhisperTransportError('flaky')))
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(),
+                      frozenset({'tls_fingerprint'}))['whisper']
+        assert w['verdict'] == 'suspicious'          # verdict survived
+        assert w['asn']['number'] == 60729           # core asn survived
+        assert w['prefix_threat']['level'] == 'CRITICAL'  # core prefix survived
+        assert 'tls' not in w                        # only tls dropped
+        assert 'tls fingerprint lookup failed' in w['unmapped_summary']
+
+    def test_tls_auth_error_terminates(self, wi, router, monkeypatch):
+        """An auth error from the opt-in TLS query is terminal — it propagates, never degraded."""
+        self._wire_tor_ip(router, {
+            'prefix': '185.220.101.0/24', 'asn': 'AS60729', 'asn_name': None,
+            'asn_country': 'DE', 'country': 'DE', 'city': None,
+            'prefix_threat_level': 'NONE', 'prefix_threat_score': 0,
+            'prefix_is_threat': False, 'prefix_threat_neighbors': 0,
+        })
+        monkeypatch.setattr(wi, 'build_tls_fragment',
+                            lambda *a, **k: (_ for _ in ()).throw(wi.WhisperAuthError('403')))
+        with pytest.raises(wi.WhisperAuthError):
+            wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(), frozenset({'tls_fingerprint'}))
+
 
 class TestFeedPolarity:
     def test_exact_slug(self, wi):
@@ -484,6 +522,59 @@ class TestIpEnrichment:
         })
         w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
         assert 'prefix_threat' not in w
+
+    _BENIGN_BELONGS = {
+        'prefix': '198.51.100.0/24', 'asn': 'AS64500', 'asn_name': None,
+        'asn_country': None, 'country': None, 'city': None,
+        'prefix_threat_level': 'NONE', 'prefix_threat_score': 0,
+        'prefix_is_threat': False, 'prefix_threat_neighbors': 0,
+    }
+    _CS_JARM = {'fingerprint': 'jarm:07d14d16d21d21d07c42d41d00041d24a458a375eef0c576d23a7bab9a9fb1',
+                'kind': 'jarm', 'family': 'cobalt-strike-default', 'cluster_size': 139}
+
+    def test_tls_fingerprint_opt_in_emitted(self, wi, router):
+        """#32: with tls_fingerprint enabled, a CS-JARM edge surfaces as data.whisper.tls.*
+        (the actionable field is family='cobalt-strike-default')."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        router.add('EMITS_TLS_FINGERPRINT', [dict(self._CS_JARM)])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(),
+                      frozenset({'tls_fingerprint'}))['whisper']
+        assert w['tls'] == self._CS_JARM
+
+    def test_tls_fingerprint_off_by_default(self, wi, router):
+        """No opt-in → the TLS query never runs and no tls field is emitted."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        router.add('EMITS_TLS_FINGERPRINT', [dict(self._CS_JARM)])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
+        assert 'tls' not in w
+        assert not any('EMITS_TLS_FINGERPRINT' in c for c, _ in router.calls)
+
+    def test_tls_fingerprint_absent_when_no_edge(self, wi, router):
+        """Enabled but the IP emits no fingerprint → field omitted (absence never rendered)."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        # no EMITS_TLS_FINGERPRINT route → query returns [] → build_tls_fragment None
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(),
+                      frozenset({'tls_fingerprint'}))['whisper']
+        assert 'tls' not in w
+
+    def test_tls_fingerprint_multiple_adds_count(self, wi, router):
+        """An IP emitting >1 fingerprint surfaces the top (highest cluster_size) + a count."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        router.add('EMITS_TLS_FINGERPRINT', [
+            dict(self._CS_JARM),
+            {'fingerprint': 'jarm:other', 'kind': 'jarm', 'family': 'cobalt-strike-default', 'cluster_size': 3},
+        ])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(),
+                      frozenset({'tls_fingerprint'}))['whisper']
+        assert w['tls']['fingerprint'] == self._CS_JARM['fingerprint'] and w['tls']['count'] == 2
+
+    def test_tls_fingerprint_ipv4_only(self, wi, router):
+        """EMITS_TLS_FINGERPRINT lives on IPV4 — the query must not run for an IPv6 IOC."""
+        router.add('IPV6', [{}])  # ipv6 context query → empty ctx
+        cfg = {'api_url': 'u', 'api_key': 'k', 'timeout': 10, 'retries': 3,
+               'extra': frozenset({'tls_fingerprint'})}
+        wi.build_ip_fragments(cfg, '2001:db8::1', 'ipv6', {}, [])
+        assert not any('EMITS_TLS_FINGERPRINT' in c for c, _ in router.calls)
 
 
 class TestDomainEnrichment:

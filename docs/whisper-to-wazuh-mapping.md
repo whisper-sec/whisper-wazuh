@@ -185,9 +185,11 @@ Verified against `virustotal.py` / `maltiverse.py` @ v4.14.5:
   `argv[6]` = timeout (default `10`) · `argv[7]` = retries (default `3`) ·
   plus a literal trailing `> /dev/null 2>&1` argument when debug is off — **read args
   positionally, never rely on `argc`.** The `<options>` JSON (argv[5]) is the config channel for
-  `api_url`, `dedup_ttl` and `dedup_scope` (`endpoint` | `org` — §7.2); resolution order:
-  options → environment (`WHISPER_API_URL` / `WHISPER_DEDUP_TTL` / `WHISPER_DEDUP_SCOPE`) →
-  built-in default. Scripts live in `/var/ossec/integrations/`, perms `750`, owner `root:wazuh`.
+  `api_url`, `dedup_ttl`, `dedup_scope` (`endpoint` | `org` — §7.2), and `extra_enrichments`
+  (a JSON list of opt-in Tier-2 features, default none — §12); resolution order: options →
+  environment (`WHISPER_API_URL` / `WHISPER_DEDUP_TTL` / `WHISPER_DEDUP_SCOPE` /
+  `WHISPER_EXTRA_ENRICHMENTS`) → built-in default. Scripts live in `/var/ossec/integrations/`,
+  perms `750`, owner `root:wazuh`.
 
 ### 2.4 How `data.whisper.*` lands in the indexer
 
@@ -365,7 +367,7 @@ fields and relies on OpenSearch **coercion** of the stringified values (verified
 | Field | Type |
 |---|---|
 | `risk_score`, `variants.confidence`, `asn.reputation.*`, `prefix_threat.score` | `float` |
-| `asn.number`, `threat_feed.sources_count`, `links.inbound_total`/`outbound_total`/`suspicious_count`, `prefix_threat.threat_neighbor_count` | `long` |
+| `asn.number`, `threat_feed.sources_count`, `links.inbound_total`/`outbound_total`/`suspicious_count`, `prefix_threat.threat_neighbor_count`, `tls.cluster_size`/`count` | `long` |
 | `known`, `available`, `truncated`, `coverage.shared_host`, `prefix_threat.is_threat` | `boolean` |
 | `threat_feed.first_seen`/`last_seen` | `date` |
 
@@ -472,6 +474,7 @@ IPv6 has **no `HAS_COUNTRY` edge** — its country comes via `LOCATED_IN → CIT
 | `(ip)-[:BELONGS_TO]->(:PREFIX).name` | `prefix` | keyword | RIR/announced prefix (CIDR). |
 | `(ip)-[:BELONGS_TO]->(:PREFIX)` threat props (`threatLevel,threatScore,isThreat,threatNeighborCount`) | `prefix_threat.{level,score,is_threat,threat_neighbor_count}` | object | **#29 — rides the same `BELONGS_TO→PREFIX` traversal (no extra round-trip).** The registered prefix carries its own threat verdict independent of the ASN aggregate (verified `185.220.101.0/24` → `CRITICAL, 151 neighbors` while `AS60729` reads `NONE`), so the granular /prefix/ signal is the actionable one. **Signal-gated:** omitted entirely for benign prefixes (a `NONE` level is not emitted). ASN-level aggregate deliberately not emitted (only 2/116 k ASNs carry a non-`NONE` level; noise for hyperscalers — `asn.reputation` already scores the ASN). BGP-hijack (announced≠registered ASN) → the `bgp-hijack-exposure` on-demand workflow, not per-alert (legitimate MOAS is common). |
 | reverse `RESOLVES_TO` / co-host | `related.neighbors[]` + `related.neighbors_total` | object[] + int | **Deferred / best-effort — see §11.** A plain reverse `MATCH (h:HOSTNAME)-[:RESOLVES_TO]->(ip {name})` is rejected as an unanchored 2.6 B-node scan; needs a co-hosting workflow or passive-DNS path. Omit (with a note in `unmapped_summary`) if unavailable. |
+| `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)` | `tls.{fingerprint,kind,family,cluster_size,count}` | object | **#32 — OPT-IN (`extra_enrichments: ["tls_fingerprint"]`, §12), IPv4 only.** A JARM match; `family` (e.g. `cobalt-strike-default`) is the actionable C2 label rule 100206 keys on. `cluster_size` = IPs sharing the fingerprint (NOT a known-bad count). **Emitted only when the edge exists** — the catalog is a frozen, sparse snapshot, so absence is never rendered. Verified live: `64.227.45.20` → CS-default JARM (cluster 139) while its verdict reads `unknown` — catches C2 the feeds miss. |
 
 ### 5.2 Domain
 
@@ -605,6 +608,13 @@ mirroring `0490-virustotal_rules.xml` (VT uses level 12 for malicious, 3 for ben
     <description>Whisper: no graph data for $(whisper.ioc)</description>
   </rule>
 
+  <!-- #32 opt-in: escalates a Cobalt Strike JARM INDEPENDENT of verdict (usually 'unknown') -->
+  <rule id="100206" level="12">
+    <if_sid>100200</if_sid>
+    <field name="whisper.tls.family" type="pcre2">^cobalt-strike-default$</field>
+    <description>Whisper: $(whisper.ioc) emits a Cobalt Strike default JARM fingerprint (possible C2)</description>
+  </rule>
+
 </group>
 ```
 
@@ -614,6 +624,7 @@ mirroring `0490-virustotal_rules.xml` (VT uses level 12 for malicious, 3 for ben
 | `suspicious` | 7 | analyst-review band |
 | `known_good` | 3 | low-noise informational |
 | `unknown` | 3 (set to 0 to suppress — a noise-policy call, §11 Q8) | informational |
+| — (TLS C2, rule 100206) | 12, **verdict-independent** | opt-in `tls.family == cobalt-strike-default`; fires even when the verdict is `unknown` (feeds miss it), §12 |
 
 Two matching subtleties, both handled above:
 
@@ -831,8 +842,47 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ---
 
+## 12. Opt-in Tier-2 enrichments (Milestone 2 / #32)
+
+Heavier or narrow-coverage graph pivots that are **OFF by default** and enabled individually via
+`<options>.extra_enrichments` (a JSON list) or `WHISPER_EXTRA_ENRICHMENTS` (comma-separated). An
+unknown name is silently ignored (a typo disables, never errors). Enable example:
+
+```xml
+<integration>
+  <name>custom-whisper</name>
+  <group>sshd</group>
+  <alert_format>json</alert_format>
+  <options>{"extra_enrichments":["tls_fingerprint"]}</options>
+</integration>
+```
+
+**Shipped features:**
+
+| key | fields | notes |
+|---|---|---|
+| `tls_fingerprint` | `tls.{fingerprint,kind,family,cluster_size,count}` (IPv4) | `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)`. 100 % of edges are `cobalt-strike-default` JARM; ~97 % of emitters read clean in feeds → **catches C2 the feeds miss**. Emitted only when the edge exists (frozen, sparse catalog — absence never rendered). Escalated by rule 100206 (level 12, verdict-independent). |
+
+**Evaluated and dropped (grounded live 2026-07-12 — data would mislead, not help):**
+
+- **CNAME chain depth** — the graph *flattens* chains (apex → all members), so `ALIAS_OF*1..5` reports depth 1 for a true depth-3 chain; the existing 1-hop `dns.cname` already has the member set; depth *anti-correlates* with threat (deepest chains are major-CDN banks).
+- **CT observations** — `CT_OBSERVATION` is a stale ~21 h snapshot (8 k nodes); **0 hits** on every established domain; 0/500 sampled were threats; absence maximally ambiguous.
+- **Origin de-cloaking** (`whisper.origins`) — does not de-cloak; returns a heuristic union of links/mx/spf (the real A-record is absent); 1.3–8.2 s, non-deterministic; **severe false-attribution risk**.
+- **Cohost count** — bounded query works but the signal doesn't separate threat (Tor exit = 1) from benign (Microsoft = 34 933); absence ambiguous (8.8.8.8 = 0 false-zero); redundant with `explain().coverage.sharedHost`.
+
+The strategic finding: **per-alert deep-infra is largely exhausted** — the graph's remaining
+investigative value lives in the heavy on-demand *workflows* (Milestone 2 / #33), not more
+per-alert fields.
+
+---
+
 ## Change log / provenance
 
+- **v1.6 (2026-07-12):** #29/#30/#32 — Tier-1 + Tier-2 enrichment expansion (all grounded live).
+  Added `prefix_threat.*` (§5.1); confirmed-malicious node flags → `known_bad` (§6 gate table);
+  `links.suspicious_count` (§5.2); opt-in `tls_fingerprint` + rule 100206 + the new §12 (with the
+  four dropped Tier-2 candidates). Dropped on ground truth: `asn.threat`, WHOIS dates, DMARC/DKIM,
+  CNAME-chain depth, CT, origins, cohost.
 - **v1.5 (2026-07-11):** #17 — indexer template + stringification findings (verified live).
   §2.4 rewritten: analysisd stringifies every value (incl. `null` → the literal string
   `"null"`), superseding the first-write-wins analysis; the connector now **strips nulls**
