@@ -63,6 +63,34 @@ def wi(whisper_module, tmp_path, monkeypatch):
     return whisper_module
 
 
+_CLI_SCRIPT = _WHISPER_DIR / 'whisper-investigate.py'
+
+
+@pytest.fixture(scope='session')
+def cli_module():
+    spec = importlib.util.spec_from_file_location('whisper_investigate', _CLI_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['whisper_investigate'] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def cli(cli_module, tmp_path, monkeypatch):
+    """The whisper-investigate CLI isolated: no network (its _http_post binding is guarded),
+    no key/env leakage, KEY_FILE in tmp. run_workflow tests override cli._http_post."""
+    import whisper_client
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError('mock cli._http_post in the test')
+
+    monkeypatch.setattr(cli_module, '_http_post', _no_network)
+    monkeypatch.setattr(whisper_client, 'KEY_FILE', str(tmp_path / 'whisper.key'))
+    for var in ('WHISPER_API_KEY', 'WHISPER_MCP_URL'):
+        monkeypatch.delenv(var, raising=False)
+    return cli_module
+
+
 @pytest.fixture()
 def wc(tmp_path, monkeypatch):
     """The shared whisper_client module isolated for a transport/config test: no network,
