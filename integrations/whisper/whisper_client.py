@@ -114,16 +114,30 @@ def _ssl_context() -> 'ssl.SSLContext':
     return ctx
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects. urllib's default handler re-sends ALL request headers (X-API-Key
+    is a custom header, so CPython's cross-origin Authorization-stripping does not cover it) on a
+    3xx — including an https->http downgrade — which would leak the API key to the redirect
+    target. Refusing to follow surfaces a 3xx as an HTTPError instead (handled below)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _http_post(url: str, body: dict, headers: dict, timeout: int) -> 'tuple[int, bytes, dict]':
     """Thin transport seam (tests monkeypatch this). Returns (status, raw, lower-cased headers).
 
     Generic POST-JSON: the connector uses it for /api/query, the CLI reuses it for the MCP
-    JSON-RPC endpoint — same TLS context, same WAF-safe requirement on the caller's UA header.
+    JSON-RPC endpoint — same TLS context, same WAF-safe requirement on the caller's UA header,
+    and redirects are never followed (the API key must not travel to a redirect target).
     """
     req = urllib.request.Request(url, data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
-    ctx = _ssl_context() if url.startswith('https') else None
+    handlers: list = [_NoRedirect()]
+    if url.startswith('https'):
+        handlers.append(urllib.request.HTTPSHandler(context=_ssl_context()))
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310 — https URL from config
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310 — https URL from config
             return resp.status, resp.read(), {k.lower(): v for k, v in resp.headers.items()}
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(), {k.lower(): v for k, v in (exc.headers or {}).items()}

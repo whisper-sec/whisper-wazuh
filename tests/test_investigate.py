@@ -136,6 +136,40 @@ class TestMcpClient:
         with pytest.raises(cli.WhisperTransportError):
             cli.run_workflow('https://mcp/', 'k', 'indicator', 'x', 90)
 
+    def test_5xx_on_toolscall_is_transport(self, cli, monkeypatch):
+        """run_workflow re-implements the status taxonomy independently of execute_query —
+        pin its 5xx -> transport branch (handshake OK, tools/call returns 500)."""
+        self._wire(cli, monkeypatch, _mcp_responses({'jsonrpc': '2.0', 'id': 2, 'result': {}})[:2]
+                   + [(500, b'upstream', {})])
+        with pytest.raises(cli.WhisperTransportError):
+            cli.run_workflow('https://mcp/', 'k', 'indicator', 'x', 90)
+
+    def test_4xx_on_toolscall_is_query(self, cli, monkeypatch):
+        """...and its non-auth 4xx -> query branch (tools/call returns 404)."""
+        self._wire(cli, monkeypatch, _mcp_responses({'jsonrpc': '2.0', 'id': 2, 'result': {}})[:2]
+                   + [(404, b'not found', {})])
+        with pytest.raises(cli.WhisperQueryError):
+            cli.run_workflow('https://mcp/', 'k', 'indicator', 'x', 90)
+
+    def test_non_dict_envelope_is_query_error(self, cli, monkeypatch):
+        """A structuredContent / content-text that is a JSON array or scalar → clean
+        WhisperQueryError, never a raw AttributeError escaping main() as a traceback."""
+        self._wire(cli, monkeypatch, _mcp_responses(
+            {'jsonrpc': '2.0', 'id': 2, 'result': {'content': [{'type': 'text', 'text': '[1,2,3]'}]}}))
+        with pytest.raises(cli.WhisperQueryError):
+            cli.run_workflow('https://mcp/', 'k', 'indicator', 'x', 90)
+
+    def test_non_dict_run_is_query_error(self, cli, monkeypatch):
+        self._wire(cli, monkeypatch, _mcp_responses(
+            {'jsonrpc': '2.0', 'id': 2, 'result': {'structuredContent': {'results': ['a string']}}}))
+        with pytest.raises(cli.WhisperQueryError):
+            cli.run_workflow('https://mcp/', 'k', 'indicator', 'x', 90)
+
+    def test_non_https_mcp_url_refused(self, cli):
+        """The API key must never be sent over plain HTTP — refuse before any network call."""
+        with pytest.raises(cli.WhisperError):
+            cli.run_workflow('http://mcp.example/', 'k', 'indicator', 'x', 90)
+
 
 class TestParseJsonRpc:
     def test_json_body(self, cli):
@@ -146,8 +180,32 @@ class TestParseJsonRpc:
         body = _sse({'id': 1, 'a': 1}) + _sse({'id': 2, 'a': 2})
         assert cli._parse_jsonrpc(body, {'content-type': 'text/event-stream'}, 2)['a'] == 2
 
+    def test_sse_picks_matching_id_not_last(self, cli):
+        """The match is NOT the last frame — pins the id-match loop against the objs[-1]
+        fallback (a trailing notification frame must not shadow the real result)."""
+        body = _sse({'id': 2, 'a': 2}) + _sse({'id': 1, 'a': 1})  # match first, noise last
+        assert cli._parse_jsonrpc(body, {'content-type': 'text/event-stream'}, 2)['a'] == 2
+
+    def test_sse_no_match_falls_back_to_last(self, cli):
+        """No frame matches want_id → the last frame is the best-effort fallback."""
+        body = _sse({'id': 1, 'a': 1}) + _sse({'id': 9, 'a': 9})
+        assert cli._parse_jsonrpc(body, {'content-type': 'text/event-stream'}, 2)['a'] == 9
+
     def test_empty_body(self, cli):
         assert cli._parse_jsonrpc(b'', {}, None) == {}
+
+    def test_json_body_with_data_substring_not_misrouted(self, cli):
+        """A JSON (not event-stream) body containing the substring 'data:' must parse as JSON,
+        not be misrouted to the SSE parser and discarded (regression: substring dispatch)."""
+        body = json.dumps({'id': 2, 'result': {'summary': 'Metadata: present, no data: gap'}}).encode()
+        obj = cli._parse_jsonrpc(body, {'content-type': 'application/json'}, 2)
+        assert obj['result']['summary'] == 'Metadata: present, no data: gap'
+
+    def test_sse_without_header_still_parsed(self, cli):
+        """If a server sends SSE but not the event-stream content-type, the JSON parse fails and
+        we fall back to SSE framing (belt-and-braces)."""
+        body = _sse({'id': 2, 'a': 2})
+        assert cli._parse_jsonrpc(body, {'content-type': ''}, 2)['a'] == 2
 
 
 class TestRender:
@@ -192,6 +250,35 @@ class TestRender:
         assert out['ioc'] == 'evil.example'
         assert out['workflow'] == 'indicator'
         assert out['derived']['verdict']['level'] == 'HIGH'
+
+    def test_null_fields_do_not_crash(self, cli):
+        """A server may emit JSON null for empty list/coverage fields — the render must not
+        crash (regression: coverage:null, views:null, items:null)."""
+        run = {'coverage': None, 'complete': True,
+               'derived': {'verdict': None, 'lede': None, 'summary': None, 'evidence': None,
+                           'details': [{'title': 'S', 'group': 'G', 'order': 0, 'views': None},
+                                       {'title': 'T', 'group': 'G', 'order': 1, 'views': [
+                                           {'kind': 'stats', 'items': None},
+                                           {'kind': 'coverage', 'checks': None},
+                                           {'kind': 'table', 'columns': ['a'], 'rows': None}]}]}}
+        assert '# Whisper Investigation: x' in cli.render_markdown({'run': run}, 'x', 'indicator')
+
+    def test_non_dict_elements_skipped(self, cli):
+        """Non-dict elements in summary/details/evidence/factors must be skipped or coerced,
+        not crash the render."""
+        run = {'coverage': {}, 'derived': {
+            'summary': ['not a dict', {'text': 'ok fact', 'severity': 'info'}],
+            'details': ['nope', {'title': 'Real', 'group': 'G', 'order': 0, 'views': []}],
+            'evidence': ['x', {'id': 'ev-1', 'fact': 'f'}],
+            'verdict': {'factors': ['plainstr', {'label': 'L'}]}}}
+        md = cli.render_markdown({'run': run}, 'x', 'indicator')
+        assert all(s in md for s in ('ok fact', 'Real', 'ev-1', 'L', 'plainstr'))
+
+    def test_table_truncation_noted(self, cli):
+        rows = [[i] for i in range(60)]
+        run = {'coverage': {}, 'derived': {'details': [{'title': 'T', 'group': 'G', 'order': 0, 'views': [
+            {'kind': 'table', 'columns': ['n'], 'rows': rows}]}]}}
+        assert '10 more row(s) not shown' in cli.render_markdown({'run': run}, 'x', 'indicator')
 
 
 class TestKeyResolution:

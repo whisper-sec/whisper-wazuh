@@ -101,31 +101,39 @@ def _parse_jsonrpc(raw: bytes, resp_headers: dict, want_id: 'int | None') -> dic
     frame whose id matches the request."""
     text = raw.decode('utf-8', 'replace')
     ct = resp_headers.get('content-type', '')
-    if 'text/event-stream' in ct or 'data:' in text:
-        objs = []
-        for line in text.splitlines():
-            if line.startswith('data:'):
-                chunk = line[5:].strip()
-                if chunk:
-                    try:
-                        objs.append(json.loads(chunk))
-                    except ValueError:
-                        pass
-        for obj in objs:
-            if obj.get('id') == want_id:
-                return obj
-        return objs[-1] if objs else {}
-    if not text.strip():
-        return {}  # e.g. a 202 for the initialized notification
-    try:
-        return json.loads(text)
-    except ValueError as exc:
-        raise WhisperQueryError('non-JSON MCP response body') from exc
+    # Dispatch on the content-type ONLY — a JSON body can legitimately contain the substring
+    # "data:" (e.g. "Metadata: ..." or a data: URI), and scanning for it would misroute a valid
+    # JSON response to the SSE parser and silently drop it. JSON is the default; SSE is used only
+    # when the header says so (or as a last-resort fallback if a JSON parse fails but data: frames
+    # are present — a server that sent SSE without the header).
+    if 'text/event-stream' not in ct:
+        stripped = text.strip()
+        if not stripped:
+            return {}  # e.g. a 202 for the initialized notification
+        try:
+            return json.loads(stripped)
+        except ValueError:
+            if 'data:' not in text:
+                raise WhisperQueryError('non-JSON MCP response body') from None
+            # else: fall through and try SSE framing
+    objs = []
+    for line in text.splitlines():
+        if line.startswith('data:'):
+            chunk = line[5:].strip()
+            if chunk:
+                try:
+                    objs.append(json.loads(chunk))
+                except ValueError:
+                    pass
+    for obj in objs:
+        if isinstance(obj, dict) and obj.get('id') == want_id:
+            return obj
+    return objs[-1] if objs else {}
 
 
 def _result_text(result: dict) -> str:
-    content = result.get('content') or []
-    if content and isinstance(content[0], dict):
+    content = result.get('content')
+    if isinstance(content, list) and content and isinstance(content[0], dict):
         return str(content[0].get('text', ''))
     return ''
 
@@ -136,6 +144,10 @@ def run_workflow(mcp_url: str, api_key: str, slug: str, ioc: str, timeout: int, 
     Raises WhisperAuthError (401/403), WhisperTransportError (network / 5xx), or
     WhisperQueryError (JSON-RPC error, tool error, malformed body).
     """
+    # The X-API-Key is sent to whatever --mcp-url names; refuse plain HTTP so the key can never
+    # go out in cleartext (an analyst pointing --mcp-url at http://attacker would else leak it).
+    if not mcp_url.lower().startswith('https://'):
+        raise WhisperError(f'refusing to send the API key over a non-HTTPS URL: {mcp_url}')
     session = {'id': None}
 
     def call(payload: dict, want_id: 'int | None') -> dict:
@@ -190,17 +202,23 @@ def run_workflow(mcp_url: str, api_key: str, slug: str, ioc: str, timeout: int, 
     result = resp.get('result') or {}
     if result.get('isError'):
         raise WhisperQueryError(f'workflow returned an error: {_result_text(result)[:300]}')
+    # The report envelope is structuredContent, or the stringified envelope in content[0].text.
+    # Guard EVERY server-supplied shape with isinstance — a non-dict (array/scalar) must raise a
+    # clean WhisperQueryError, never an AttributeError that escapes main() as a traceback.
     envelope = result.get('structuredContent')
-    if not envelope:
+    if not isinstance(envelope, dict):
         try:
-            envelope = json.loads(_result_text(result))
+            parsed = json.loads(_result_text(result))
+            envelope = parsed if isinstance(parsed, dict) else None
         except ValueError:
             envelope = None
-    runs = (envelope or {}).get('results') or []
-    if not runs:
+    runs = envelope.get('results') if isinstance(envelope, dict) else None
+    if not isinstance(runs, list) or not runs:
         raise WhisperQueryError('MCP returned no workflow results')
-    return {'run': runs[0], 'references': (envelope or {}).get('references', {}),
-            'quota': (envelope or {}).get('quota', {})}
+    run = runs[0]
+    if not isinstance(run, dict):
+        raise WhisperQueryError('MCP returned a malformed workflow result')
+    return {'run': run, 'references': envelope.get('references', {}), 'quota': envelope.get('quota', {})}
 
 
 # --- report rendering ---------------------------------------------------------------------
@@ -210,33 +228,42 @@ def _headline(text: str) -> 'tuple[str, str]':
     return (head, rest) if sep else (text, '')
 
 
+_TABLE_ROW_CAP = 50
+
+
 def _render_view(view: dict, out: list) -> None:
+    # Every list field uses `or []` (not `.get(k, [])`): the workflow orchestrator can emit a
+    # JSON `null` for an empty field, and iterating None would crash the whole report.
+    if not isinstance(view, dict):
+        return
     kind = view.get('kind')
     if kind == 'stats':
-        for item in view.get('items', []):
+        for item in view.get('items') or []:
             hint = f" _{item['hint']}_" if item.get('hint') else ''
             out.append(f"- **{item.get('label', '')}:** {item.get('value', '')}{hint}")
     elif kind == 'coverage':
         if view.get('caption'):
             out.append(f"_{view['caption']}_")
-        for chk in view.get('checks', []):
+        for chk in view.get('checks') or []:
             mark = '✓' if chk.get('state') == 'present' else '✗'
             note = f" — {chk['note']}" if chk.get('note') else ''
             out.append(f"- {mark} {chk.get('label', '')}{note}")
     elif kind == 'findings':
-        for f in view.get('items', []):
+        for f in view.get('items') or []:
             badge = _SEV_BADGE.get(str(f.get('severity', '')).lower(), '•')
             out.append(f"- {badge} **{f.get('title', '')}** — {f.get('detail', '')}")
             if f.get('fix'):
                 out.append(f"  - _Fix:_ {f['fix']}")
     elif kind == 'table':
-        cols = view.get('columns', [])
-        rows = view.get('rows', [])
+        cols = view.get('columns') or []
+        rows = view.get('rows') or []
         if cols:
             out.append('| ' + ' | '.join(str(c) for c in cols) + ' |')
             out.append('| ' + ' | '.join('---' for _ in cols) + ' |')
-            for row in rows[:50]:
-                out.append('| ' + ' | '.join(str(c) for c in row) + ' |')
+            for row in rows[:_TABLE_ROW_CAP]:
+                out.append('| ' + ' | '.join(str(c) for c in (row or [])) + ' |')
+            if len(rows) > _TABLE_ROW_CAP:  # never silently drop evidence rows
+                out.append(f"_… {len(rows) - _TABLE_ROW_CAP} more row(s) not shown (use --format json)_")
     else:  # unknown kind — never crash; dump defensively
         out.append('```json')
         out.append(json.dumps(view, indent=2, ensure_ascii=False)[:2000])
@@ -244,11 +271,15 @@ def _render_view(view: dict, out: list) -> None:
 
 
 def render_markdown(payload: dict, ioc: str, slug: str) -> str:
-    run = payload['run']
+    # Every optional field is guarded and every list uses `or []` — the report must render (or
+    # degrade gracefully) for ANY server-supplied shape, incl. JSON nulls and non-dict elements,
+    # rather than crash main() with a traceback.
+    run = payload.get('run') or {}
     derived = run.get('derived') or {}
     title = WORKFLOWS.get(slug, slug)
+    cov = run.get('coverage') or {}  # null-safe (a JSON null coverage must not crash the meta line)
     out = [f'# Whisper Investigation: {ioc}', '']
-    meta = f'**{title}** · {run.get("coverage", {}).get("stepsTotal", "?")} steps'
+    meta = f'**{title}** · {cov.get("stepsTotal", "?")} steps'
     if run.get('totalLatencyMs') is not None:
         meta += f' · {run["totalLatencyMs"]} ms'
     if run.get('complete') is False:
@@ -261,12 +292,12 @@ def render_markdown(payload: dict, ioc: str, slug: str) -> str:
         out += ['', lede]
 
     verdict = derived.get('verdict')
-    if verdict:
+    if isinstance(verdict, dict):
         score = verdict.get('score', 0)
         score_str = f'{score:.2f}' if isinstance(score, (int, float)) else score
         out += ['', f"## Verdict: {verdict.get('level', 'NONE')} (score {score_str})"]
-        for factor in verdict.get('factors', []):
-            out.append(f"- {factor.get('label', '')}")
+        for factor in verdict.get('factors') or []:
+            out.append(f"- {factor.get('label', '')}" if isinstance(factor, dict) else f"- {factor}")
         if verdict.get('sources'):
             out.append(f"- _sources: {', '.join(str(s) for s in verdict['sources'])}_")
 
@@ -274,18 +305,20 @@ def render_markdown(payload: dict, ioc: str, slug: str) -> str:
     if summary:
         out += ['', '## Summary']
         for fact in summary:
+            if not isinstance(fact, dict):
+                continue
             badge = _SEV_BADGE.get(str(fact.get('severity', '')).lower(), '•')
             head, rest = _headline(fact.get('text', ''))
             out.append(f"- {badge} **{head}**" + (f' — {rest}' if rest else ''))
 
-    for section in sorted(derived.get('details') or [], key=lambda s: (s.get('group', ''), s.get('order', 0))):
+    details = [s for s in (derived.get('details') or []) if isinstance(s, dict)]
+    for section in sorted(details, key=lambda s: (str(s.get('group', '')), s.get('order', 0) or 0)):
         out += ['', f"## {section.get('title', 'Section')}"]
         if section.get('description'):
             out.append(f"> {section['description']}")
-        for view in section.get('views', []):
+        for view in section.get('views') or []:
             _render_view(view, out)
 
-    cov = run.get('coverage') or {}
     if cov:
         out += ['', '## Coverage',
                 f"{cov.get('stepsWithData', 0)}/{cov.get('stepsTotal', 0)} steps returned data "
@@ -296,6 +329,8 @@ def render_markdown(payload: dict, ioc: str, slug: str) -> str:
     if evidence:
         out += ['', '## Evidence']
         for ev in evidence:
+            if not isinstance(ev, dict):
+                continue
             prov = ev.get('provenance') or {}
             out.append(f"- **{ev.get('id', '')}** ({prov.get('rowCount', 0)} rows): {ev.get('fact', '')}")
             if prov.get('query'):

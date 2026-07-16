@@ -150,6 +150,13 @@ class TestHttpClient:
         assert sleeps == [wc.BACKOFF_BASE]  # 0.5s, not 1.0s
 
 
+class TestNoRedirect:
+    def test_redirects_never_followed(self, wc):
+        """urllib's default handler re-sends X-API-Key across a redirect (incl. https->http);
+        _NoRedirect must refuse to follow so the key can never travel to a redirect target."""
+        assert wc._NoRedirect().redirect_request(None, None, 302, 'Found', {}, 'http://evil/') is None
+
+
 class TestConfigResolution:
     """resolve_api_key / resolve_api_url live in whisper_client now."""
 
