@@ -41,6 +41,8 @@ def test_investigate_wrapper_parses():
 def test_investigate_wrapper_fails_loudly_without_python():
     """The whisper-investigate wrapper mirrors the connector's — no /var/ossec python on a
     dev machine → clear error, never exec the IOC arg as Python."""
-    r = subprocess.run(['sh', str(INVESTIGATE_WRAPPER), '8.8.8.8'], capture_output=True, text=True, env={}, timeout=10)
+    r = subprocess.run(
+        ['sh', str(INVESTIGATE_WRAPPER), '8.8.8.8'], capture_output=True, text=True, env={}, timeout=10
+    )
     assert r.returncode == 1
     assert 'wazuh python not found' in r.stderr

@@ -93,7 +93,7 @@ class TestSafetyInvariants:
         cp block (else a runtime ImportError / missing tool on the manager)."""
         t = _text(INSTALL)
         for f in ('whisper_client.py', 'whisper-investigate', 'whisper-investigate.py'):
-            assert f'REQUIRED=' in t and f in t.split('REQUIRED=', 1)[1].split('\n', 1)[0], f
+            assert 'REQUIRED=' in t and f in t.split('REQUIRED=', 1)[1].split('\n', 1)[0], f
             assert f in t  # also copied/chowned
         # uninstall removes them
         u = _text(UNINSTALL)

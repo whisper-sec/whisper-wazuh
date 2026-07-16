@@ -9,9 +9,11 @@ include = ["integrations/whisper/*.py", "tests/*.py"]
 
 [tool.ruff.lint]
 extend-select = ["I", "UP", "B"]
-# UP037/UP007: the shipped script uses quoted `'str | None'` annotations on purpose —
-# keep them as strings for maximum runtime compatibility on the bundled interpreter.
-ignore = ["UP037"]
+# UP037: the shipped scripts use quoted `'str | None'` annotations on purpose — keep them as
+#   strings for maximum runtime compatibility on the bundled interpreter.
+# UP038: `isinstance(x, (int, float))` — the tuple form is idiomatic and faster than the
+#   `int | float` union form (ruff later deprecated this rule); these are hot per-value paths.
+ignore = ["UP037", "UP038"]
 
 [tool.ruff.format]
 quote-style = "single"

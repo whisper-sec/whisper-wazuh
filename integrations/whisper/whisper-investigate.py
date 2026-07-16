@@ -70,7 +70,15 @@ WORKFLOWS = {
     'route-health': 'Network & Routing Report',
 }
 
-_SEV_BADGE = {'error': '🔴', 'warning': '🟠', 'info': '🔵', 'critical': '🔴', 'high': '🟠', 'medium': '🟡', 'low': '🔵'}
+_SEV_BADGE = {
+    'error': '🔴',
+    'warning': '🟠',
+    'info': '🔵',
+    'critical': '🔴',
+    'high': '🟠',
+    'medium': '🟡',
+    'low': '🔵',
+}
 
 
 def log_verbose(enabled: bool, msg: str) -> None:
@@ -138,7 +146,9 @@ def _result_text(result: dict) -> str:
     return ''
 
 
-def run_workflow(mcp_url: str, api_key: str, slug: str, ioc: str, timeout: int, verbose: bool = False) -> dict:
+def run_workflow(
+    mcp_url: str, api_key: str, slug: str, ioc: str, timeout: int, verbose: bool = False
+) -> dict:
     """Run one workflow via MCP and return the normalized run envelope (results[0]).
 
     Raises WhisperAuthError (401/403), WhisperTransportError (network / 5xx), or
@@ -165,7 +175,10 @@ def run_workflow(mcp_url: str, api_key: str, slug: str, ioc: str, timeout: int, 
             status, raw, resp_headers = _http_post(mcp_url, payload, headers, timeout)
         except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
             raise WhisperTransportError(f'MCP transport error: {exc}') from exc
-        log_verbose(verbose, f'{payload.get("method")} -> HTTP {status} ({int((time.monotonic() - started) * 1000)}ms)')
+        log_verbose(
+            verbose,
+            f'{payload.get("method")} -> HTTP {status} ({int((time.monotonic() - started) * 1000)}ms)',
+        )
         if resp_headers.get('mcp-session-id'):
             session['id'] = resp_headers['mcp-session-id']
         if status in (401, 403):
@@ -182,22 +195,40 @@ def run_workflow(mcp_url: str, api_key: str, slug: str, ioc: str, timeout: int, 
             raise WhisperQueryError(f'MCP error {err.get("code")}: {err.get("message")}')
 
     # 1) initialize — capture the session id from the response header
-    check_rpc(call({
-        'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
-        'params': {'protocolVersion': MCP_PROTOCOL_VERSION, 'capabilities': {},
-                   'clientInfo': {'name': 'whisper-investigate', 'version': VERSION}},
-    }, 1))
+    check_rpc(
+        call(
+            {
+                'jsonrpc': '2.0',
+                'id': 1,
+                'method': 'initialize',
+                'params': {
+                    'protocolVersion': MCP_PROTOCOL_VERSION,
+                    'capabilities': {},
+                    'clientInfo': {'name': 'whisper-investigate', 'version': VERSION},
+                },
+            },
+            1,
+        )
+    )
     # 2) initialized notification (no id / no result body expected)
     call({'jsonrpc': '2.0', 'method': 'notifications/initialized'}, None)
     # 3) tools/call run_workflow — the blocking run
-    resp = call({
-        'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
-        'params': {'name': 'run_workflow', 'arguments': {
-            'runs': [{'slug': slug, 'input': ioc}],
-            'format': 'compact',
-            'output': {'emit': 'query-only', 'slices': ['summary', 'details', 'lede', 'evidence']},
-        }},
-    }, 2)
+    resp = call(
+        {
+            'jsonrpc': '2.0',
+            'id': 2,
+            'method': 'tools/call',
+            'params': {
+                'name': 'run_workflow',
+                'arguments': {
+                    'runs': [{'slug': slug, 'input': ioc}],
+                    'format': 'compact',
+                    'output': {'emit': 'query-only', 'slices': ['summary', 'details', 'lede', 'evidence']},
+                },
+            },
+        },
+        2,
+    )
     check_rpc(resp)
     result = resp.get('result') or {}
     if result.get('isError'):
@@ -263,7 +294,7 @@ def _render_view(view: dict, out: list) -> None:
             for row in rows[:_TABLE_ROW_CAP]:
                 out.append('| ' + ' | '.join(str(c) for c in (row or [])) + ' |')
             if len(rows) > _TABLE_ROW_CAP:  # never silently drop evidence rows
-                out.append(f"_… {len(rows) - _TABLE_ROW_CAP} more row(s) not shown (use --format json)_")
+                out.append(f'_… {len(rows) - _TABLE_ROW_CAP} more row(s) not shown (use --format json)_')
     else:  # unknown kind — never crash; dump defensively
         out.append('```json')
         out.append(json.dumps(view, indent=2, ensure_ascii=False)[:2000])
@@ -297,7 +328,7 @@ def render_markdown(payload: dict, ioc: str, slug: str) -> str:
         score_str = f'{score:.2f}' if isinstance(score, (int, float)) else score
         out += ['', f"## Verdict: {verdict.get('level', 'NONE')} (score {score_str})"]
         for factor in verdict.get('factors') or []:
-            out.append(f"- {factor.get('label', '')}" if isinstance(factor, dict) else f"- {factor}")
+            out.append(f"- {factor.get('label', '')}" if isinstance(factor, dict) else f'- {factor}')
         if verdict.get('sources'):
             out.append(f"- _sources: {', '.join(str(s) for s in verdict['sources'])}_")
 
@@ -309,7 +340,7 @@ def render_markdown(payload: dict, ioc: str, slug: str) -> str:
                 continue
             badge = _SEV_BADGE.get(str(fact.get('severity', '')).lower(), '•')
             head, rest = _headline(fact.get('text', ''))
-            out.append(f"- {badge} **{head}**" + (f' — {rest}' if rest else ''))
+            out.append(f'- {badge} **{head}**' + (f' — {rest}' if rest else ''))
 
     details = [s for s in (derived.get('details') or []) if isinstance(s, dict)]
     for section in sorted(details, key=lambda s: (str(s.get('group', '')), s.get('order', 0) or 0)):
@@ -320,10 +351,13 @@ def render_markdown(payload: dict, ioc: str, slug: str) -> str:
             _render_view(view, out)
 
     if cov:
-        out += ['', '## Coverage',
-                f"{cov.get('stepsWithData', 0)}/{cov.get('stepsTotal', 0)} steps returned data "
-                f"({cov.get('stepsEmpty', 0)} empty, {cov.get('stepsSkipped', 0)} skipped, "
-                f"{cov.get('stepsError', 0)} error). No-data is not proof of benign."]
+        out += [
+            '',
+            '## Coverage',
+            f"{cov.get('stepsWithData', 0)}/{cov.get('stepsTotal', 0)} steps returned data "
+            f"({cov.get('stepsEmpty', 0)} empty, {cov.get('stepsSkipped', 0)} skipped, "
+            f"{cov.get('stepsError', 0)} error). No-data is not proof of benign.",
+        ]
 
     evidence = derived.get('evidence') or []
     if evidence:
@@ -341,15 +375,19 @@ def render_markdown(payload: dict, ioc: str, slug: str) -> str:
 
 def render_json(payload: dict, ioc: str, slug: str) -> str:
     run = payload['run']
-    return json.dumps({
-        'ioc': ioc,
-        'workflow': slug,
-        'complete': run.get('complete'),
-        'total_latency_ms': run.get('totalLatencyMs'),
-        'coverage': run.get('coverage'),
-        'derived': run.get('derived'),
-        'references': payload.get('references'),
-    }, indent=2, ensure_ascii=False)
+    return json.dumps(
+        {
+            'ioc': ioc,
+            'workflow': slug,
+            'complete': run.get('complete'),
+            'total_latency_ms': run.get('totalLatencyMs'),
+            'coverage': run.get('coverage'),
+            'derived': run.get('derived'),
+            'references': payload.get('references'),
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
 # --- CLI ----------------------------------------------------------------------------------
@@ -368,15 +406,25 @@ def build_parser() -> argparse.ArgumentParser:
         description='Run a Whisper investigation workflow against an IOC and print a report.',
     )
     p.add_argument('ioc', help='the indicator to investigate (IP, IPv6, or domain)')
-    p.add_argument('--workflow', default=DEFAULT_WORKFLOW,
-                   help=f'workflow slug (default: {DEFAULT_WORKFLOW}). Known: {", ".join(sorted(WORKFLOWS))}')
+    p.add_argument(
+        '--workflow',
+        default=DEFAULT_WORKFLOW,
+        help=f'workflow slug (default: {DEFAULT_WORKFLOW}). Known: {", ".join(sorted(WORKFLOWS))}',
+    )
     p.add_argument('--format', choices=('md', 'json'), default='md', help='report format (default: md)')
     p.add_argument('--out', help='write the report to FILE instead of stdout')
     p.add_argument('--api-key', help='Whisper API key (else $WHISPER_API_KEY, else the key file)')
-    p.add_argument('--mcp-url', default=os.environ.get('WHISPER_MCP_URL', DEFAULT_MCP_URL),
-                   help=f'MCP server URL (default: {DEFAULT_MCP_URL})')
-    p.add_argument('--timeout', type=int, default=DEFAULT_TIMEOUT,
-                   help=f'per-call HTTP timeout, seconds (default: {DEFAULT_TIMEOUT})')
+    p.add_argument(
+        '--mcp-url',
+        default=os.environ.get('WHISPER_MCP_URL', DEFAULT_MCP_URL),
+        help=f'MCP server URL (default: {DEFAULT_MCP_URL})',
+    )
+    p.add_argument(
+        '--timeout',
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help=f'per-call HTTP timeout, seconds (default: {DEFAULT_TIMEOUT})',
+    )
     p.add_argument('--verbose', action='store_true', help='log request timing to stderr')
     return p
 
@@ -392,8 +440,10 @@ def main(argv: 'list[str]') -> int:
 
     api_key = resolve_cli_key(args.api_key, os.environ)
     if not api_key:
-        print('whisper-investigate: no API key (pass --api-key, set $WHISPER_API_KEY, or the key file)',
-              file=sys.stderr)
+        print(
+            'whisper-investigate: no API key (pass --api-key, set $WHISPER_API_KEY, or the key file)',
+            file=sys.stderr,
+        )
         return ERR_AUTH
 
     try:
@@ -405,8 +455,11 @@ def main(argv: 'list[str]') -> int:
         print(f'whisper-investigate: {exc}', file=sys.stderr)
         return ERR_GENERAL
 
-    report = render_json(payload, ioc, args.workflow) if args.format == 'json' \
+    report = (
+        render_json(payload, ioc, args.workflow)
+        if args.format == 'json'
         else render_markdown(payload, ioc, args.workflow)
+    )
     if args.out:
         try:
             with open(args.out, 'w') as f:
