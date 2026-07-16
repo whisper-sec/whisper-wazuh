@@ -13,7 +13,7 @@ COMPOSE_AGENT := $(COMPOSE) -f $(STACK_DIR)/docker-compose.agent.yml
 
 .PHONY: help dev-init dev-certs dev-up dev-up-basic dev-down dev-reset dev-restart dev-ps dev-logs \
         dev-agent-up dev-agent-down dev-agent-logs dev-agent-demo \
-        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke
+        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-acceptance
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -91,3 +91,6 @@ dev-whisper-smoke: ## Inject 3 IOC scenarios and show the connector's log eviden
 		|| echo "no whisper log lines yet — is the connector installed (make dev-whisper-install)?"
 	@echo "--- expected: invoke line for 185.220.101.1 (+auth error if the key is a placeholder);"
 	@echo "---           skip reason=non-global for 10.0.0.5 and 203.0.113.45"
+
+dev-acceptance: ## Run the e2e acceptance suite (TC-01..TC-22) against the live stack (needs a real key)
+	python3 tests/e2e/run_acceptance.py $(TC)
