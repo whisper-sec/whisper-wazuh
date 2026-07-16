@@ -876,8 +876,53 @@ per-alert fields.
 
 ---
 
+## 13. On-demand investigations — `whisper-investigate` (Milestone 2 / #33)
+
+The per-alert connector answers "is this IOC bad, briefly?" The heavy Whisper **workflows**
+(the 81-step `indicator` Threat Investigation, `attack-surface`, `typosquat`,
+`subdomain-takeover`, …) answer "tell me everything and why" — too expensive to run per alert,
+so they are exposed as an **analyst-triggered CLI**, `whisper-investigate`, installed alongside
+the connector in `/var/ossec/integrations/`.
+
+```sh
+whisper-investigate theblackservicenetwork.com                 # default: indicator, Markdown
+whisper-investigate 185.220.101.1 --workflow attack-surface    # a different workflow
+whisper-investigate evil.example --format json --out r.json    # machine-readable
+```
+
+**Transport — the load-bearing finding (verified live 2026-07-14).** Workflows are **NOT** on
+the REST `/api/query` surface (`POST /api/workflows/{slug}/run` → 404; that host serves only
+Cypher). They run **only via the MCP server** (`mcp.whisper.security`) over **MCP
+Streamable-HTTP JSON-RPC**. The CLI implements a minimal stdlib MCP client:
+`initialize` → `notifications/initialized` → `tools/call run_workflow`, authed with the same
+`X-API-Key` header as the connector, echoing the `Mcp-Session-Id`, and handling a response that
+is **either** `application/json` **or** `text/event-stream` (SSE). It is **synchronous** — one
+blocking call returns the full report (`indicator` ≈ 13–23 s, ~40–130 KB). Shared HTTP/TLS/auth
+lives in `whisper_client.py` (the WAF-safe User-Agent, CA-bundle resolution, retry taxonomy),
+imported by both the connector and the CLI so it can never drift.
+
+**Report.** Rendered from `results[0].derived` (already normalized by the workflow orchestrator):
+an optional `verdict {score, level, factors[]}`, a `summary[]` of ranked facts (severity
+`error`/`warning`/`info`), `details[]` sections sorted by `(group, order)` whose `views[]` are
+dispatched by `kind` (`stats` / `coverage` / `findings` / `table`; unknown kinds dumped
+defensively so a new kind never crashes the renderer), and an `evidence[]` citation store with
+the exact Cypher. A `--format json` emits `derived` verbatim. **Absence is a gap, not a verdict:**
+the Coverage line surfaces empty/skipped steps — no-data is never rendered as "clean".
+
+**Config / auth.** `--api-key` (flag-first for a CLI) → `$WHISPER_API_KEY` → the key file;
+`--mcp-url` / `$WHISPER_MCP_URL` overrides the server; `--timeout` (default 90 s). Exit codes: 0
+ok · 2 bad args · 3 unrecognizable IOC · 8 auth · 1 other. IOC detection reuses the connector's
+`parse_ip`/`classify_domain` but **not** the `is_global` guard — an analyst may investigate a
+private address on purpose.
+
+---
+
 ## Change log / provenance
 
+- **v1.7 (2026-07-16):** #33 — on-demand `whisper-investigate` CLI (new §13). Shared
+  `whisper_client.py` extracted from the connector (no behavior change). Transport finding:
+  Whisper workflows run only via the MCP server (Streamable-HTTP JSON-RPC), not REST — validated
+  live with a stdlib client.
 - **v1.6 (2026-07-12):** #29/#30/#32 — Tier-1 + Tier-2 enrichment expansion (all grounded live).
   Added `prefix_threat.*` (§5.1); confirmed-malicious node flags → `known_bad` (§6 gate table);
   `links.suspicious_count` (§5.2); opt-in `tls_fingerprint` + rule 100206 + the new §12 (with the

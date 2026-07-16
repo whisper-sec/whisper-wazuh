@@ -86,3 +86,16 @@ class TestSafetyInvariants:
 
     def test_refresh_index_requires_dev(self):
         assert '--refresh-index requires --dev' in _text(INSTALL)
+
+    def test_required_includes_shared_module_and_cli(self):
+        """The connector ImportErrors without whisper_client.py, and the on-demand CLI (#33)
+        must ship too — install.sh copies an explicit list, so both must be in REQUIRED and the
+        cp block (else a runtime ImportError / missing tool on the manager)."""
+        t = _text(INSTALL)
+        for f in ('whisper_client.py', 'whisper-investigate', 'whisper-investigate.py'):
+            assert f'REQUIRED=' in t and f in t.split('REQUIRED=', 1)[1].split('\n', 1)[0], f
+            assert f in t  # also copied/chowned
+        # uninstall removes them
+        u = _text(UNINSTALL)
+        for f in ('whisper_client.py', 'whisper-investigate', 'whisper-investigate.py'):
+            assert f in u, f

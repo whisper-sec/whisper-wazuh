@@ -66,7 +66,9 @@ chmod 660 "$OSSEC_CONF"
 
 # ---- 2. remove installed files -----------------------------------------------------------
 log "removing integration files"
-rm -f "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py"
+rm -f "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py" \
+    "$WAZUH_PATH/integrations/whisper_client.py" \
+    "$WAZUH_PATH/integrations/whisper-investigate" "$WAZUH_PATH/integrations/whisper-investigate.py"
 rm -f "$WAZUH_PATH/etc/rules/whisper_rules.xml" "$WAZUH_PATH/etc/rules/whisper_test_rules.xml"
 
 if [ "$PURGE" = "1" ]; then

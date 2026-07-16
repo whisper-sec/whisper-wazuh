@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parent.parent / 'integrations' / 'whisper' / 'custom-whisper.py'
+_WHISPER_DIR = Path(__file__).resolve().parent.parent / 'integrations' / 'whisper'
+_SCRIPT = _WHISPER_DIR / 'custom-whisper.py'
+# The connector does `import whisper_client` (its sibling in integrations/); put that dir on
+# sys.path so the importlib-loaded connector resolves it — at runtime it is sys.path[0].
+if str(_WHISPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_WHISPER_DIR))
 
 
 def _load_module():
@@ -35,22 +40,71 @@ def wi(whisper_module, tmp_path, monkeypatch):
     the WHISPER_* env vars are cleared so main()-driving tests never read a developer's
     real credentials or config.
     """
+    import whisper_client
+
     log_file = tmp_path / 'integrations.log'
     monkeypatch.setattr(whisper_module, 'LOG_FILE', str(log_file))
-    monkeypatch.setattr(whisper_module, 'KEY_FILE', str(tmp_path / 'whisper.key'))
     monkeypatch.setattr(whisper_module, 'DEDUP_DB', str(tmp_path / 'whisper' / 'dedup.db'))
     monkeypatch.setattr(whisper_module, 'debug_enabled', True)
+    # resolve_api_key reads whisper_client.KEY_FILE at call time — isolate it into tmp so a
+    # main()-driven test never reads a developer's real /var/ossec/etc/whisper.key.
+    monkeypatch.setattr(whisper_client, 'KEY_FILE', str(tmp_path / 'whisper.key'))
     for var in ('WHISPER_API_KEY', 'WHISPER_API_URL', 'WHISPER_DEDUP_TTL', 'WHISPER_DEDUP_SCOPE'):
         monkeypatch.delenv(var, raising=False)
 
-    # Hard no-network guard: the unit tier must never reach the live API. Tests that
-    # exercise transport behavior monkeypatch _http_post (or execute_query) themselves.
+    # Hard no-network guard: the unit tier must never reach the live API. execute_query lives
+    # in whisper_client and calls whisper_client._http_post, so the guard MUST land there.
+    # Tests that exercise transport behavior monkeypatch it themselves (see the wc fixture).
     def _no_network(*args, **kwargs):
         raise AssertionError('unit tests must not reach the network — mock execute_query/_http_post')
 
-    monkeypatch.setattr(whisper_module, '_http_post', _no_network)
+    monkeypatch.setattr(whisper_client, '_http_post', _no_network)
     whisper_module._test_log_file = log_file  # convenience handle for assertions
     return whisper_module
+
+
+_CLI_SCRIPT = _WHISPER_DIR / 'whisper-investigate.py'
+
+
+@pytest.fixture(scope='session')
+def cli_module():
+    spec = importlib.util.spec_from_file_location('whisper_investigate', _CLI_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['whisper_investigate'] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def cli(cli_module, tmp_path, monkeypatch):
+    """The whisper-investigate CLI isolated: no network (its _http_post binding is guarded),
+    no key/env leakage, KEY_FILE in tmp. run_workflow tests override cli._http_post."""
+    import whisper_client
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError('mock cli._http_post in the test')
+
+    monkeypatch.setattr(cli_module, '_http_post', _no_network)
+    monkeypatch.setattr(whisper_client, 'KEY_FILE', str(tmp_path / 'whisper.key'))
+    for var in ('WHISPER_API_KEY', 'WHISPER_MCP_URL'):
+        monkeypatch.delenv(var, raising=False)
+    return cli_module
+
+
+@pytest.fixture()
+def wc(tmp_path, monkeypatch):
+    """The shared whisper_client module isolated for a transport/config test: no network,
+    KEY_FILE in tmp. Transport tests override wc._http_post with their own sequence mock."""
+    import whisper_client
+
+    monkeypatch.setattr(whisper_client, 'KEY_FILE', str(tmp_path / 'whisper.key'))
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError('mock whisper_client._http_post in the test')
+
+    monkeypatch.setattr(whisper_client, '_http_post', _no_network)
+    monkeypatch.setattr(whisper_client, 'log_api', lambda url, ms: None)
+    return whisper_client
 
 
 @pytest.fixture()

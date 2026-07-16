@@ -91,7 +91,7 @@ done
 [ -f "$OSSEC_CONF" ] || fail "$OSSEC_CONF not found"
 [ "$REFRESH_INDEX" = "1" ] && [ "$DEV_MODE" = "0" ] && fail "--refresh-index requires --dev (destructive)"
 
-REQUIRED="custom-whisper custom-whisper.py whisper_rules.xml whisper-template.json"
+REQUIRED="custom-whisper custom-whisper.py whisper_client.py whisper-investigate whisper-investigate.py whisper_rules.xml whisper-template.json"
 [ "$DEV_MODE" = "1" ] && REQUIRED="$REQUIRED whisper_test_rules.xml"
 for f in $REQUIRED; do
     [ -f "$SRC_DIR/$f" ] || fail "source file missing: $SRC_DIR/$f"
@@ -131,9 +131,17 @@ fi
 
 # ---- 1. integration script + wrapper (750 root:wazuh) --------------------------------
 log "installing integration script -> $WAZUH_PATH/integrations/"
-cp "$SRC_DIR/custom-whisper" "$SRC_DIR/custom-whisper.py" "$WAZUH_PATH/integrations/" || fail "cp integration script failed"
-chown root:wazuh "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py"
-chmod 750 "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py"
+cp "$SRC_DIR/custom-whisper" "$SRC_DIR/custom-whisper.py" "$SRC_DIR/whisper_client.py" \
+   "$SRC_DIR/whisper-investigate" "$SRC_DIR/whisper-investigate.py" "$WAZUH_PATH/integrations/" \
+    || fail "cp integration script failed"
+chown root:wazuh "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py" \
+    "$WAZUH_PATH/integrations/whisper_client.py" \
+    "$WAZUH_PATH/integrations/whisper-investigate" "$WAZUH_PATH/integrations/whisper-investigate.py"
+# Executables 750 (integratord runs custom-whisper; analysts run whisper-investigate); the
+# imported modules 640 (read, not executed).
+chmod 750 "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py" \
+    "$WAZUH_PATH/integrations/whisper-investigate" "$WAZUH_PATH/integrations/whisper-investigate.py"
+chmod 640 "$WAZUH_PATH/integrations/whisper_client.py"
 
 # ---- 2. rules (660 root:wazuh) --------------------------------------------------------
 log "installing whisper_rules.xml -> $WAZUH_PATH/etc/rules/"

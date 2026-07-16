@@ -1,0 +1,40 @@
+#!/bin/sh
+# whisper-investigate — analyst-triggered on-demand Whisper investigation (Pattern A / #33).
+# Wrapper modeled on the connector's launcher: resolves the manager's bundled Python and
+# execs whisper-investigate.py with the analyst's argv intact.
+# Install target: /var/ossec/integrations/whisper-investigate (750 root:wazuh).
+#
+# Copyright (C) whisper.security — Apache-2.0
+
+WPYTHON_BIN="framework/python/bin/python3"
+
+SCRIPT_PATH_NAME="$0"
+
+DIR_NAME="$(cd "$(dirname "${SCRIPT_PATH_NAME}")" && pwd -P)"
+SCRIPT_NAME="$(basename "${SCRIPT_PATH_NAME}")"
+
+case ${DIR_NAME} in
+    */integrations)
+        # Installed layout: {WAZUH_HOME}/integrations/whisper-investigate
+        WAZUH_PATH="${WAZUH_PATH:-$(cd "${DIR_NAME}/.." && pwd)}"
+    ;;
+    *)
+        # Any other location (e.g. the repo checkout) — default to the standard home.
+        WAZUH_PATH="${WAZUH_PATH:-/var/ossec}"
+    ;;
+esac
+
+PYTHON_BIN="${WAZUH_PATH}/${WPYTHON_BIN}"
+PYTHON_SCRIPT="${DIR_NAME}/${SCRIPT_NAME}.py"
+
+if [ ! -x "${PYTHON_BIN}" ]; then
+    echo "${SCRIPT_NAME}: wazuh python not found or not executable: ${PYTHON_BIN}" >&2
+    exit 1
+fi
+
+if [ ! -f "${PYTHON_SCRIPT}" ]; then
+    echo "${SCRIPT_NAME}: investigation script not found: ${PYTHON_SCRIPT}" >&2
+    exit 1
+fi
+
+exec "${PYTHON_BIN}" "${PYTHON_SCRIPT}" "$@"
