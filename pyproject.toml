@@ -5,7 +5,7 @@
 [tool.ruff]
 target-version = "py310"
 line-length = 110
-include = ["integrations/whisper/*.py", "tests/*.py"]
+include = ["integrations/whisper/*.py", "tests/*.py", "tests/e2e/*.py"]
 
 [tool.ruff.lint]
 extend-select = ["I", "UP", "B"]
