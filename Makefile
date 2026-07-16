@@ -13,7 +13,7 @@ COMPOSE_AGENT := $(COMPOSE) -f $(STACK_DIR)/docker-compose.agent.yml
 
 .PHONY: help dev-init dev-certs dev-up dev-up-basic dev-down dev-reset dev-restart dev-ps dev-logs \
         dev-agent-up dev-agent-down dev-agent-logs dev-agent-demo \
-        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-acceptance
+        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-demo-enrich
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -92,5 +92,21 @@ dev-whisper-smoke: ## Inject 3 IOC scenarios and show the connector's log eviden
 	@echo "--- expected: invoke line for 185.220.101.1 (+auth error if the key is a placeholder);"
 	@echo "---           skip reason=non-global for 10.0.0.5 and 203.0.113.45"
 
-dev-acceptance: ## Run the e2e acceptance suite (TC-01..TC-22) against the live stack (needs a real key)
-	python3 tests/e2e/run_acceptance.py $(TC)
+# The 5-minute demo (acceptance §7). Injects ONE IOC via the manager's analysisd queue and shows
+# the connector's evidence. Default seed is a graph-listed Tor exit (NOT 203.0.113.45 — that is
+# TEST-NET-3, which the connector's public-IP guard deliberately skips). Override with IOC=<value>.
+IOC ?= 185.220.101.1
+
+dev-demo-enrich: ## Inject one IOC (IOC=<value>, default a graph-listed Tor IP) and show the enrichment
+	@$(COMPOSE_BASE) exec -T wazuh.manager sh -c "grep -q 'integrator.debug' /var/ossec/etc/local_internal_options.conf 2>/dev/null || { echo 'integrator.debug=2' >> /var/ossec/etc/local_internal_options.conf; /var/ossec/bin/wazuh-control restart >/dev/null 2>&1; sleep 5; }"
+	@echo "--- injecting IOC=$(IOC) via the manager analysisd queue ---"
+	@$(COMPOSE_BASE) exec -T wazuh.manager /var/ossec/framework/python/bin/python3 -c "\
+	import socket,time; \
+	s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM); s.connect('/var/ossec/queue/sockets/queue'); \
+	s.send(('1:whisper-demo:'+time.strftime('%b %e %H:%M:%S')+' host sshd[9]: Failed password for invalid user demo from $(IOC) port 4444 ssh2').encode()); s.close()"
+	@sleep 8
+	@echo "--- connector log evidence (integrations.log) ---"
+	@$(COMPOSE_BASE) exec -T wazuh.manager sh -c "grep 'whisper:' /var/ossec/logs/integrations.log 2>/dev/null | tail -6" \
+		|| echo "no whisper log lines — is the connector installed (make dev-whisper-install) with a real key in /var/ossec/etc/whisper.key?"
+	@echo "--- the enrichment lands as a NEW alert (data.whisper.*) in wazuh-alerts-*."
+	@echo "--- walkthrough with a real captured response: docs/scenarios/01-tor-ip-enrichment.md ---"
