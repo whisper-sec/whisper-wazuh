@@ -149,6 +149,7 @@ FIELD_PATHS: 'tuple[tuple[str, str, str], ...]' = (
 MAX_LIST_VALUES = 10  # bound list-valued fields (some JSON decoders aggregate repeats)
 ORIGINAL_LOG_MAX = 512  # source_ref.original_full_log truncation — mapping §4.2
 
+
 # _DOMAIN_RE and the WhisperError / Auth / Transport / Query taxonomy are imported from
 # whisper_client. WhisperSocketError is analysisd-only (the socket write-back, #16), so it
 # lives here and subclasses the imported base.
@@ -742,8 +743,7 @@ _Q_IP_CONTEXT_V4 = (
     'OPTIONAL MATCH (ip)-[:HAS_COUNTRY]->(c:COUNTRY) '
     'OPTIONAL MATCH (ip)-[:LOCATED_IN]->(city:CITY) '
     'RETURN p.name AS prefix, a.name AS asn, an.name AS asn_name, '
-    'ac.name AS asn_country, c.name AS country, city.name AS city, '
-    + _IP_THREAT_RETURN + ' LIMIT 1'
+    'ac.name AS asn_country, c.name AS country, city.name AS city, ' + _IP_THREAT_RETURN + ' LIMIT 1'
 )
 _Q_IP_CONTEXT_V6 = (
     'MATCH (ip:IPV6 {name: $v}) '
@@ -752,8 +752,7 @@ _Q_IP_CONTEXT_V6 = (
     'OPTIONAL MATCH (a)-[:HAS_COUNTRY]->(ac:COUNTRY) '
     'OPTIONAL MATCH (ip)-[:LOCATED_IN]->(city:CITY) '
     'RETURN p.name AS prefix, a.name AS asn, an.name AS asn_name, '
-    'ac.name AS asn_country, city.name AS city, '
-    + _IP_THREAT_RETURN + ' LIMIT 1'
+    'ac.name AS asn_country, city.name AS city, ' + _IP_THREAT_RETURN + ' LIMIT 1'
 )
 
 
@@ -1502,8 +1501,15 @@ def main(args: 'list[str]') -> int:
             continue
         try:
             payload = enrich(
-                ioc, ioc_type, key, build_source_ref(alert, field_path),
-                api_url, api_key, timeout, retries, extra,
+                ioc,
+                ioc_type,
+                key,
+                build_source_ref(alert, field_path),
+                api_url,
+                api_key,
+                timeout,
+                retries,
+                extra,
             )
             sent = send_event(payload, alert.get('agent'))
             record_dedup(key, dedup_ttl)  # only after a successful emit — failures stay retryable

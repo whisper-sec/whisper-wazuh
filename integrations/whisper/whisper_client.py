@@ -16,6 +16,7 @@ Logging is decoupled: `log_api` defaults to a no-op here; the connector override
 """
 
 import http.client
+import ipaddress  # noqa: F401 — re-exported for callers that build on parse_ip's return type
 import json
 import os
 import re
@@ -24,7 +25,6 @@ import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
-import ipaddress  # noqa: F401 — re-exported for callers that build on parse_ip's return type
 
 # --- paths & constants --------------------------------------------------------------------
 # Wazuh home is one level up from integrations/ (realpath so a symlinked install still

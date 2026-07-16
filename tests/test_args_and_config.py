@@ -87,7 +87,9 @@ class TestExtraEnrichments:
         assert wi.resolve_extra_enrichments({}, {}) == frozenset()
 
     def test_options_json_list(self, wi):
-        assert wi.resolve_extra_enrichments({'extra_enrichments': ['tls_fingerprint']}, {}) == {'tls_fingerprint'}
+        assert wi.resolve_extra_enrichments({'extra_enrichments': ['tls_fingerprint']}, {}) == {
+            'tls_fingerprint'
+        }
 
     def test_options_comma_string(self, wi):
         got = wi.resolve_extra_enrichments({'extra_enrichments': 'tls_fingerprint, foo'}, {})
@@ -99,7 +101,9 @@ class TestExtraEnrichments:
 
     def test_options_beats_env(self, wi):
         # a present (even empty) options list means "no extras", not "fall through to env"
-        got = wi.resolve_extra_enrichments({'extra_enrichments': []}, {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'})
+        got = wi.resolve_extra_enrichments(
+            {'extra_enrichments': []}, {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'}
+        )
         assert got == frozenset()
 
     def test_unknown_only_is_empty(self, wi):
@@ -135,7 +139,9 @@ class TestApiKeyResolution:
         key_file = tmp_path / 'whisper.key'
         key_file.write_text(whisper_client.API_KEY_PLACEHOLDER)
         resolved = wi.resolve_api_key(
-            whisper_client.API_KEY_PLACEHOLDER, {'WHISPER_API_KEY': whisper_client.API_KEY_PLACEHOLDER}, str(key_file)
+            whisper_client.API_KEY_PLACEHOLDER,
+            {'WHISPER_API_KEY': whisper_client.API_KEY_PLACEHOLDER},
+            str(key_file),
         )
         assert resolved is None
 
