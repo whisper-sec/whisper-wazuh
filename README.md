@@ -12,6 +12,12 @@ Whisper→Wazuh data mapping are being finalized before implementation begins.
 See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) and
 [issues](https://github.com/whisper-sec/whisper-wazuh/issues) for current work.
 
+## Documentation
+
+- [**Architecture**](docs/architecture.md) — how the whole solution fits together (start here).
+- [Whisper→Wazuh mapping](docs/whisper-to-wazuh-mapping.md) — the field-by-field mapping, verdict gates, and enrichment envelope.
+- [MVP acceptance criteria](docs/mvp-acceptance-criteria.md) — the TC-01..TC-22 test matrix and definition of done.
+
 ## Branching
 
 - `main` — release-only, stable.
