@@ -3,7 +3,6 @@
 Whisper integration for [Wazuh](https://wazuh.com/) — enrich Wazuh alerts and indicators
 with relationship context from the Whisper infrastructure graph.
 
-Sister project to [`whisper-opencti`](https://github.com/whisper-sec/whisper-opencti).
 
 ## Status
 
