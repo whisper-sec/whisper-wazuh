@@ -20,7 +20,7 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build the install bundle
+      - name: Build the install bundle (tarball)
         run: |
           set -eu
           name="whisper-wazuh-${{ steps.ver.outputs.version }}"
@@ -30,8 +30,25 @@ jobs:
           tar czf "$name.tar.gz" "$name"
           # a stable-named copy so `releases/latest/download/whisper-wazuh.tar.gz` resolves
           cp "$name.tar.gz" whisper-wazuh.tar.gz
-          sha256sum whisper-wazuh-*.tar.gz whisper-wazuh.tar.gz > SHA256SUMS
           echo "--- bundle contents ---"; tar tzf "$name.tar.gz"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Build .deb and .rpm (nfpm)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          nfpm="$(go env GOPATH)/bin/nfpm"
+          "$nfpm" package -f packaging/nfpm.yaml -p deb -t .
+          "$nfpm" package -f packaging/nfpm.yaml -p rpm -t .
+          ls -la ./*.deb ./*.rpm
+
+      - name: Checksums
+        run: sha256sum whisper-wazuh-*.tar.gz whisper-wazuh.tar.gz ./*.deb ./*.rpm > SHA256SUMS
 
       - name: Create the GitHub Release
         env:
@@ -39,6 +56,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             "whisper-wazuh-${{ steps.ver.outputs.version }}.tar.gz" \
-            whisper-wazuh.tar.gz SHA256SUMS \
+            whisper-wazuh.tar.gz ./*.deb ./*.rpm SHA256SUMS \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

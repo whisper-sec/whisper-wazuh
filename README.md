@@ -21,20 +21,34 @@ See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) an
 
 ## Install
 
-On your Wazuh manager (4.x), download the latest release bundle and run the installer:
+On your Wazuh manager (4.x, as root). Pick whichever fits — all three run the same `install.sh`.
 
+**A — one-line bootstrap** (easiest):
 ```bash
-# download + unpack the self-contained bundle
+curl -sSL https://raw.githubusercontent.com/whisper-sec/whisper-wazuh/main/bootstrap.sh \
+  | sudo sh -s -- --group sshd --api-key-file /path/to/your-whisper-key.txt
+```
+
+**B — download the tarball** (inspect before running as root):
+```bash
 curl -sSL https://github.com/whisper-sec/whisper-wazuh/releases/latest/download/whisper-wazuh.tar.gz | tar xz
 cd whisper-wazuh-*
-
-# install: choose which rule groups trigger enrichment, and provide your Whisper API key from a file
 sudo sh install.sh --group sshd --api-key-file /path/to/your-whisper-key.txt
 ```
 
-The installer pushes the indexer template, drops the files, patches `ossec.conf` (with rollback),
-restarts, and verifies. Enrichment starts on the next alert in a trigger group that carries a
-public IP or domain.
+**C — OS package** (`.deb`/`.rpm`, for `apt`/`yum` + config management):
+```bash
+# grab the package for your distro from the Releases page, then:
+sudo dpkg -i whisper-wazuh_<ver>_all.deb        # Debian/Ubuntu  (RHEL: rpm -i …noarch.rpm)
+sudo whisper-wazuh-install --group sshd --api-key-file /path/to/your-whisper-key.txt
+```
+The package stages the files to `/usr/share/whisper-wazuh` and adds a `whisper-wazuh-install`
+command; it does **not** auto-activate (activation patches `ossec.conf` and restarts the manager,
+so it's an explicit admin step).
+
+All three push the indexer template, drop the files, patch `ossec.conf` (with rollback), restart,
+and verify. Enrichment starts on the next alert in a trigger group that carries a public IP or
+domain.
 
 **Prerequisites:** a Wazuh manager 4.x (root), TLS egress to `graph.whisper.security`, and your
 own Whisper API key (BYOK). Running a **containerized** manager? Skip `--api-key-file` and inject
