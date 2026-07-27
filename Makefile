@@ -13,7 +13,7 @@ COMPOSE_AGENT := $(COMPOSE) -f $(STACK_DIR)/docker-compose.agent.yml
 
 .PHONY: help dev-init dev-certs dev-up dev-up-basic dev-down dev-reset dev-restart dev-ps dev-logs \
         dev-agent-up dev-agent-down dev-agent-logs dev-agent-demo \
-        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-demo-enrich
+        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-demo-enrich dev-acceptance
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -110,3 +110,6 @@ dev-demo-enrich: ## Inject one IOC (IOC=<value>, default a graph-listed Tor IP) 
 		|| echo "no whisper log lines — is the connector installed (make dev-whisper-install) with a real key in /var/ossec/etc/whisper.key?"
 	@echo "--- the enrichment lands as a NEW alert (data.whisper.*) in wazuh-alerts-*."
 	@echo "--- walkthrough with a real captured response: docs/scenarios/01-tor-ip-enrichment.md ---"
+
+dev-acceptance: ## Run the e2e acceptance suite (TC-01..TC-22) against the live stack (needs a real key)
+	python3 tests/e2e/run_acceptance.py $(TC)
