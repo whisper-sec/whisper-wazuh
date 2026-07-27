@@ -7,16 +7,46 @@ Sister project to [`whisper-opencti`](https://github.com/whisper-sec/whisper-ope
 
 ## Status
 
-🚧 **Milestone 0 — Requirement Analysis.** Scope, integration pattern, and the
-Whisper→Wazuh data mapping are being finalized before implementation begins.
+**Milestones 1 (MVP) & 2 (Enrichment Expansion) complete** — a working per-alert connector plus
+an on-demand investigation CLI, verified end-to-end on **Wazuh 4.14.5**. First release: **v1.0.0**
+(see [Install](#install) and the [changelog](CHANGELOG.md)).
 See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) and
-[issues](https://github.com/whisper-sec/whisper-wazuh/issues) for current work.
+[issues](https://github.com/whisper-sec/whisper-wazuh/issues) for what's next.
 
 ## Documentation
 
 - [**Architecture**](docs/architecture.md) — how the whole solution fits together (start here).
 - [Whisper→Wazuh mapping](docs/whisper-to-wazuh-mapping.md) — the field-by-field mapping, verdict gates, and enrichment envelope.
 - [MVP acceptance criteria](docs/mvp-acceptance-criteria.md) — the TC-01..TC-22 test matrix and definition of done.
+
+## Install
+
+On your Wazuh manager (4.x), download the latest release bundle and run the installer:
+
+```bash
+# download + unpack the self-contained bundle
+curl -sSL https://github.com/whisper-sec/whisper-wazuh/releases/latest/download/whisper-wazuh.tar.gz | tar xz
+cd whisper-wazuh-*
+
+# install: choose which rule groups trigger enrichment, and provide your Whisper API key from a file
+sudo sh install.sh --group sshd --api-key-file /path/to/your-whisper-key.txt
+```
+
+The installer pushes the indexer template, drops the files, patches `ossec.conf` (with rollback),
+restarts, and verifies. Enrichment starts on the next alert in a trigger group that carries a
+public IP or domain.
+
+**Prerequisites:** a Wazuh manager 4.x (root), TLS egress to `graph.whisper.security`, and your
+own Whisper API key (BYOK). Running a **containerized** manager? Skip `--api-key-file` and inject
+`WHISPER_API_KEY` as a container-env secret instead.
+
+**Verify:**
+```bash
+grep whisper: /var/ossec/logs/integrations.log   # expect  invoke → api → emit
+```
+then search `data.whisper.ioc:<the IP>` in the dashboard — a new enrichment alert appears next to
+the original. See [Architecture](docs/architecture.md) for how it all fits together, and
+[`uninstall.sh`](integrations/whisper/uninstall.sh) to remove it cleanly.
 
 ## Branching
 

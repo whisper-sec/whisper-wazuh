@@ -12,11 +12,14 @@
 # an existing managed block is removed and re-rendered with the current flags.
 #
 # Usage:
-#   install.sh [--group <csv>] [--dev] [--skip-template] [--refresh-index]
-#              [--indexer-url URL] [--indexer-user USER] [--indexer-pass PASS]
+#   install.sh [--group <csv>] [--api-key-file PATH] [--dev] [--skip-template]
+#              [--refresh-index] [--indexer-url URL] [--indexer-user USER] [--indexer-pass PASS]
 #
 #   --group <csv>     Rule groups that trigger enrichment (default: sshd). NEVER level-only,
 #                     and never a group the enrichment alerts themselves carry (loop guard).
+#   --api-key-file P  Install your Whisper API key from file P into /var/ossec/etc/whisper.key
+#                     (640 root:wazuh). The key never touches a command line. Omit to keep the
+#                     placeholder (then set the key file yourself, or use the WHISPER_API_KEY env).
 #   --dev             Dev mode: also install whisper_test_rules.xml and add the whisper_test
 #                     group to the trigger filter (domain-TC mechanism).
 #   --skip-template   Skip the indexer template PUT (install _template/whisper yourself
@@ -46,6 +49,7 @@ GROUPS_CSV="sshd"
 DEV_MODE=0
 SKIP_TEMPLATE=0
 REFRESH_INDEX=0
+API_KEY_FILE_ARG=""
 INDEXER_URL_ARG="$(printf '%s' "${INDEXER_URL:-https://localhost:9200}" | tr -d '"')"
 INDEXER_USER_ARG="${INDEXER_USERNAME:-admin}"
 INDEXER_PASS_ARG="${INDEXER_PASSWORD:-}"
@@ -78,6 +82,7 @@ while [ $# -gt 0 ]; do
         --dev)           DEV_MODE=1; shift ;;
         --skip-template) SKIP_TEMPLATE=1; shift ;;
         --refresh-index) REFRESH_INDEX=1; shift ;;
+        --api-key-file)  API_KEY_FILE_ARG="$2"; shift 2 ;;
         --indexer-url)   INDEXER_URL_ARG="$2"; shift 2 ;;
         --indexer-user)  INDEXER_USER_ARG="$2"; shift 2 ;;
         --indexer-pass)  INDEXER_PASS_ARG="$2"; shift 2 ;;
@@ -156,8 +161,18 @@ if [ "$DEV_MODE" = "1" ]; then
 fi
 
 # ---- 3. key file (640 root:wazuh; placeholder never counts as a key) ------------------
-if [ ! -f "$KEY_FILE" ]; then
-    log "creating $KEY_FILE with placeholder (put your real Whisper API key in it)"
+# --api-key-file installs the real key straight from a file (the key never appears on any
+# command line — safer than an argv flag). Otherwise: create a placeholder if none exists,
+# and leave an existing key file untouched (a reinstall keeps the operator's key).
+if [ -n "$API_KEY_FILE_ARG" ]; then
+    [ -f "$API_KEY_FILE_ARG" ] || fail "--api-key-file: $API_KEY_FILE_ARG not found"
+    KEY_CONTENT="$(head -n1 "$API_KEY_FILE_ARG" | tr -d ' \t\r\n')"
+    [ -n "$KEY_CONTENT" ] && [ "$KEY_CONTENT" != "$PLACEHOLDER" ] \
+        || fail "--api-key-file: $API_KEY_FILE_ARG is empty or holds the placeholder"
+    log "installing the provided API key -> $KEY_FILE (640 root:wazuh)"
+    printf '%s\n' "$KEY_CONTENT" > "$KEY_FILE" || fail "cannot write $KEY_FILE"
+elif [ ! -f "$KEY_FILE" ]; then
+    log "creating $KEY_FILE with placeholder (put your real Whisper API key in it, or use --api-key-file)"
     printf '%s\n' "$PLACEHOLDER" > "$KEY_FILE" || fail "cannot write $KEY_FILE"
 fi
 chown root:wazuh "$KEY_FILE"
