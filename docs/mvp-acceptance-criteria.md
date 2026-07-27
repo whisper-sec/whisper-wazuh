@@ -1,6 +1,6 @@
 # whisper-wazuh MVP — success criteria & acceptance tests
 
-**Status:** Milestone 0 — Requirement Analysis · target **Wazuh 4.14.5** · resolves
+**Status:** met in **v1.0.0** — all criteria verified on **Wazuh 4.14.5** · resolves
 [#5](https://github.com/whisper-sec/whisper-wazuh/issues/5)
 
 Defines what **done** means for the MVP connector: the functional acceptance criteria, the test
@@ -170,7 +170,7 @@ the expected alert and produce false failures.
 | TC-13 | Whisper API unreachable | Set `<options>{"api_url":"https://localhost:1/"}` (§1.1 knob), restart, inject | Bounded retries/backoff honouring argv timeout(10)/retries(3); `whisper: error class=transport` line (auth ≠ transport ≠ query); no enrichment alert; no integratord hang |
 | TC-14 | Degraded scoring (`available:false`) | **Unit tier:** feed fixture `tests/fixtures/explain_unavailable.json` (`available:false` + `retryAfter`) through the verdict/envelope builder (pytest + `responses`) | Built payload has `available:false`, `verdict:unknown`; backoff honours `retryAfter`. Degraded-but-answering ≠ unreachable (TC-13). Live reproduction not required |
 | TC-15 | Payload guard | Uses the TC-02 event (`google.com`, >1 M links) | Enrichment alert present **and** no `Exit status was:` line (an `errno 90` overflow would crash the send); `len(links.inbound[]/outbound[]) ≤` documented cap; `*_total` present; `truncated:true`; `whisper: emit … payload_bytes=<n>` with `n < 61440` (scope AC#7) |
-| TC-16 | Rules render all verdicts | **After install.sh**, run one `wazuh-logtest` invocation per event (verified stdin mode), e.g. `printf '%s\n' '{"integration":"custom-whisper","whisper":{"verdict":"known_bad","level":"CRITICAL","ioc":"x"}}' \| docker exec -i wazuh-single-node-wazuh.manager-1 /var/ossec/bin/wazuh-logtest` — 5 events: known_bad, known_bad+CRITICAL, suspicious, known_good, unknown | Pass grep per event: Phase 3 shows the expected rule id and `**Alert to be generated.` — 100201→12, 100205→14, 100202→7, 100203→3, 100204→3. **Caveat:** logtest loads rules fresh from disk — a pass does *not* prove live analysisd has them; TC-01 covers live |
+| TC-16 | Rules render all verdicts | **After install.sh**, run one `wazuh-logtest` invocation per event (verified stdin mode), e.g. `printf '%s\n' '{"integration":"custom-whisper","whisper":{"verdict":"known_bad","level":"CRITICAL","ioc":"x"}}' \| docker exec -i wazuh-single-node-wazuh.manager-1 /var/ossec/bin/wazuh-logtest` — 5 events: known_bad, known_bad+CRITICAL, suspicious, known_good, unknown | Pass grep per event: Phase 3 shows the expected rule id and `**Alert to be generated.` — 100201→12, 100205→14, 100202→7, 100203→3, 100204→3. **Scope:** these are the five verdict→level rules; the opt-in TLS rule 100206 (`whisper.tls.family=cobalt-strike-default`→12) is off by default and exercised via the `tls_fingerprint` enrichment path, not this verdict matrix. **Caveat:** logtest loads rules fresh from disk — a pass does *not* prove live analysisd has them; TC-01 covers live |
 | TC-17 | Determinism / stable structure | Run TC-01, **reset dedup**, run again; diff the two `data.whisper` objects | Identical key set and types (values may drift with the live graph); truncated lists always carry totals; `unmapped_summary` populated when data was dropped (scope AC#6) |
 | TC-18 | install.sh end-to-end | Fresh manager (`make dev-reset` + up), run `install.sh` | Files land with `root:wazuh 750`; `ossec.conf` patched **and still `root:wazuh 660`**; restart OK; sanity check §1.2 passes (scope AC#9) |
 | TC-19 | Secrets handling | Scan repo + `ossec.conf` for the key-format regex (real keys are UUID-shaped, e.g. `[0-9a-f]{8}-[0-9a-f]{4}-…`); the shipped placeholder literal is `WHISPER_API_KEY_PLACEHOLDER`. During an injection, sample `/proc/<pid>/cmdline` of the running script in a tight loop | No regex hit anywhere in repo/conf; key resolves env → `/var/ossec/etc/whisper.key` (`640 root:wazuh`) → argv. **Note:** if `<api_key>` *is* set in `ossec.conf`, integratord passes it as `argv[2]` and it **will** appear in the process cmdline — which is exactly why the recommended tiers leave it as the placeholder; cmdline sampling must show only empty/placeholder (scope AC#10) |
@@ -192,7 +192,7 @@ Each TC maps back to the scope's acceptance criteria (issue #1 §4) — traceabi
 | API budget & backoff | Honour argv `timeout`(10 s)/`retries`(3); backoff on 429/5xx honouring `Retry-After`; respect `retryAfter` from degraded `explain()`; quota introspectable via `whisper.quota()`. 429/`Retry-After` behaviour is verified in the **mocked unit tier** (pytest + `responses`), not by a live TC — the opencti pattern | opencti client policy (30 s/3/0.5 backoff) adapted to integratord's argv contract |
 | TLP filtering | **Not applicable** — Wazuh alerts carry no TLP markings. The Wazuh analog of opencti's `max_tlp` skip-gate is the integration filter + the public-IP guard (TC-04/05). Stated explicitly because issue #5 names TLP. | opencti TC-18/19 have no Wazuh equivalent |
 | Robustness | A failing script must never destabilise the manager (TC-12/13); oversized payloads degrade per mapping §8, never fail the send | `MAX_EVENT_SIZE` 65535; integrator.c error paths |
-| Test tooling | Python ≥3.11, plain `pytest` (unit tier mocks HTTP — `responses` lib, opencti pattern); lint per CONTRIBUTING (`ruff`) — note opencti actually uses isort/black/flake8 (its README's "ruff" is stale), so ruff here is a **fresh choice, not a mirror** | opencti CI has no coverage gate; we mirror that (no % threshold for MVP) |
+| Test tooling | Python 3.10 (the manager's interpreter; CI also runs 3.12), plain `pytest` (unit tier mocks HTTP — `responses` lib, opencti pattern); lint per CONTRIBUTING (`ruff`) — note opencti actually uses isort/black/flake8 (its README's "ruff" is stale), so ruff here is a **fresh choice, not a mirror** | opencti CI has no coverage gate; we mirror that (no % threshold for MVP) |
 
 ---
 
@@ -250,30 +250,33 @@ Format mirrors opencti's scenario docs (seed → what happens → real captured 
 5. **Guard:** inject with `10.0.0.5` → nothing (private IP skipped) — show the log line.
 6. Close with the indexer query (§1.2 step 3) as the machine-readable proof.
 
-**Deliverables for this plan:** a parameterised `make dev-demo-enrich IOC=<value>` target
-(manager-only socket injection; the agent overlay stays optional), and one captured scenario doc
-`docs/scenarios/01-tor-ip-enrichment.md` following the opencti 4-part layout (seed / trigger event
-/ real Whisper response / resulting enrichment alert JSON).
+**Deliverables (shipped):** the parameterised `make dev-demo-enrich IOC=<value>` target
+(manager-only socket injection; the agent overlay stays optional), and the captured scenario doc
+[`docs/scenarios/01-tor-ip-enrichment.md`](scenarios/01-tor-ip-enrichment.md) following the opencti
+4-part layout (seed / trigger event / real Whisper response / resulting enrichment alert JSON).
 
-**CI:** unit tier on every PR (pytest, mocked HTTP). A full e2e in CI is **realistic** — Wazuh
-runs this exact single-node compose stack in its own GitHub Actions (ubuntu-22.04; GH-hosted
-runners already ship `vm.max_map_count=262144`; manager+indexer only, dashboard omitted;
-poll-based waits, ~4–6 min startup). Recommended as a follow-up job once the connector lands;
-**manual QA per §3 remains the MVP release gate.**
+**CI:** unit tier on every PR (pytest, mocked HTTP). The end-to-end acceptance runner shipped too —
+`tests/e2e/run_acceptance.py` (`make dev-acceptance`) drives TC-01..TC-22 against a live
+single-node stack (the same compose Wazuh runs in its own GitHub Actions: ubuntu-22.04, GH-hosted
+runners already ship `vm.max_map_count=262144`, manager+indexer only, poll-based waits, ~4–6 min
+startup). **Manual QA per §3 remains the release gate**, with the runner automating the repeatable
+checks.
 
 ---
 
 ## 8. Sign-off checklist (exit criterion for #5)
 
-- [ ] TC-01 … TC-22 pass on a fresh `make dev-up` + `install.sh`
-- [ ] Demo scenario doc reproduces against the live graph (shape/types match)
-- [ ] Zero open S1/S2; all S3/S4 ticketed with owners
-- [ ] No real API key in repo or config (TC-19)
-- [ ] Blocking mapping-spec questions resolved: §11 Q1 (field paths validated on real alerts),
+Signed off with the v1.0.0 release (QA on a fresh Wazuh 4.14.5 stack):
+
+- [x] TC-01 … TC-22 pass on a fresh `make dev-up` + `install.sh`
+- [x] Demo scenario doc reproduces against the live graph (shape/types match)
+- [x] Zero open S1/S2; all S3/S4 ticketed with owners
+- [x] No real API key in repo or config (TC-19)
+- [x] Blocking mapping-spec questions resolved: §11 Q1 (field paths validated on real alerts),
       Q2 (dedup backend/TTL — cache path and knobs now pinned by this plan), Q3 (Form A vs B
       attribution). *This plan already resolves Q8: `unknown` → level 3, alert not suppress
       (TC-06/TC-16).*
-- [ ] Product owner approval on this document
+- [x] Product owner approval on this document
 
 ---
 

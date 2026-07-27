@@ -95,7 +95,7 @@ on `data.whisper.prefix_threat.score` works even though `_source` shows the stri
 
 ```json
 {
-  "rule": { "id": "100202", "level": 7, "description": "Whisper: 185.220.101.1 is SUSPICIOUS (CRITICAL)" },
+  "rule": { "id": "100202", "level": 7, "description": "Whisper: 185.220.101.1 is SUSPICIOUS (HIGH)" },
   "data": {
     "integration": "custom-whisper",
     "whisper": {

@@ -1,6 +1,6 @@
 # Whisper → Wazuh data & field mapping
 
-**Status:** Milestone 0 — Requirement Analysis · target **Wazuh 4.14.5** · resolves
+**Status:** shipped in **v1.0.0** · verified on **Wazuh 4.14.5** · resolves
 [#3](https://github.com/whisper-sec/whisper-wazuh/issues/3)
 
 Wazuh has no STIX-native sink. This spec defines how results from the Whisper infrastructure
@@ -348,8 +348,8 @@ fields and relies on OpenSearch **coercion** of the stringified values (verified
   so it rides on top of the stock one (merge verified live: stock fields keep their mappings).
   **Never convert it to a composable `_index_template`** — a matching composable template
   silently *disables* all legacy templates for that index, nuking the entire stock mapping.
-- Install (**before the first enrichment alert** — this PUT becomes a step of #18's
-  `install.sh`, which does not exist yet):
+- Install (**before the first enrichment alert** — `install.sh` does this PUT as its first step,
+  so an unreachable indexer aborts the install before the manager is touched):
 
   ```bash
   curl -sk -u <user>:<pass> -XPUT "https://<indexer>:9200/_template/whisper" \
@@ -800,9 +800,11 @@ allows); historical-alert backfill (indexer-side reader); optional upstream to `
 
 ---
 
-## 11. Open questions
+## 11. Design questions (from the research pass)
 
-Flagged by the research pass; to resolve before/while implementing:
+Flagged during requirement analysis. Kept here as the decision log — about half (items 1–3, 5, 9)
+were resolved before or during the v1.0.0 build (struck through, with the resolving issue); the rest
+are settled type/noise-policy calls or items deferred post-MVP, noted inline on each:
 
 1. ~~**`SUPPORTED_FIELD_PATHS` validation.**~~ **Resolved (#12 Q1, 2026-07-06):** the §9 table
    is now validated against the live dev stack + 4.14.5 template/ruleset source; wrong
