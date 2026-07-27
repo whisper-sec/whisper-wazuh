@@ -87,6 +87,16 @@ class TestSafetyInvariants:
     def test_refresh_index_requires_dev(self):
         assert '--refresh-index requires --dev' in _text(INSTALL)
 
+    def test_api_key_file_option(self):
+        """--api-key-file (#42) installs the key FROM A FILE — never on argv — into the key
+        file at 640 root:wazuh, and rejects an empty/placeholder file."""
+        t = _text(INSTALL)
+        assert '--api-key-file' in t and 'API_KEY_FILE_ARG' in t
+        assert 'chmod 640 "$KEY_FILE"' in t
+        assert 'empty or holds the placeholder' in t
+        # the key content must come from the FILE, not a bare argv value (no `--api-key)` handler)
+        assert '--api-key)' not in t
+
     def test_required_includes_shared_module_and_cli(self):
         """The connector ImportErrors without whisper_client.py, and the on-demand CLI (#33)
         must ship too — install.sh copies an explicit list, so both must be in REQUIRED and the
