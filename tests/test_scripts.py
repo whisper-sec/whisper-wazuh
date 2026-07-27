@@ -7,7 +7,8 @@ integration testing alone — a few structural guardrails catch regressions in C
 import subprocess
 from pathlib import Path
 
-WHISPER = Path(__file__).resolve().parent.parent / 'integrations' / 'whisper'
+ROOT = Path(__file__).resolve().parent.parent
+WHISPER = ROOT / 'integrations' / 'whisper'
 INSTALL = WHISPER / 'install.sh'
 UNINSTALL = WHISPER / 'uninstall.sh'
 
@@ -25,6 +26,18 @@ class TestSyntax:
     def test_uninstall_parses_as_posix_sh(self):
         r = subprocess.run(['sh', '-n', str(UNINSTALL)], capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
+
+    def test_release_scripts_parse_as_posix_sh(self):
+        """bootstrap.sh + the packaging wrappers (#42) run on strangers' hosts — keep them
+        POSIX-sh clean so /bin/sh (dash/busybox) doesn't choke on a bashism."""
+        for rel in (
+            'bootstrap.sh',
+            'packaging/whisper-wazuh-install',
+            'packaging/whisper-wazuh-uninstall',
+            'packaging/postinstall.sh',
+        ):
+            r = subprocess.run(['sh', '-n', str(ROOT / rel)], capture_output=True, text=True)
+            assert r.returncode == 0, f'{rel}: {r.stderr}'
 
 
 class TestSafetyInvariants:

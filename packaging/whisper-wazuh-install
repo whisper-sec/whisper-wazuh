@@ -1,0 +1,4 @@
+#!/bin/sh
+# Wrapper installed to /usr/bin by the whisper-wazuh package. Runs the packaged installer from
+# its share dir — install.sh locates its bundle via its own path, so this must NOT be a symlink.
+exec sh /usr/share/whisper-wazuh/install.sh "$@"
