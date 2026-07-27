@@ -7,15 +7,17 @@ Sister project to [`whisper-opencti`](https://github.com/whisper-sec/whisper-ope
 
 ## Status
 
-**Milestones 1 (MVP) & 2 (Enrichment Expansion) complete** — a working per-alert connector plus
-an on-demand investigation CLI, verified end-to-end on **Wazuh 4.14.5**. First release: **v1.0.0**
-(see [Install](#install) and the [changelog](CHANGELOG.md)).
+**Released — v1.0.0.** Milestones 1 (MVP), 2 (Enrichment Expansion), and 3 (Release &
+Distribution) are complete: a working per-alert connector plus an on-demand investigation CLI,
+verified end-to-end on **Wazuh 4.14.5**, and shipped as a tarball, `.deb`/`.rpm` packages, and a
+one-line installer (see [Install](#install) and the [changelog](CHANGELOG.md)).
 See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) and
 [issues](https://github.com/whisper-sec/whisper-wazuh/issues) for what's next.
 
 ## Documentation
 
 - [**Architecture**](docs/architecture.md) — how the whole solution fits together (start here).
+- [**Installation & configuration**](docs/installation.md) — the full admin guide: install methods, the API key, trigger groups, verify, and troubleshooting.
 - [Whisper→Wazuh mapping](docs/whisper-to-wazuh-mapping.md) — the field-by-field mapping, verdict gates, and enrichment envelope.
 - [MVP acceptance criteria](docs/mvp-acceptance-criteria.md) — the TC-01..TC-22 test matrix and definition of done.
 

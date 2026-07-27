@@ -30,10 +30,14 @@ interpreter); bring your own Whisper API key.
 - **install.sh / uninstall.sh** — safe, idempotent install (indexer template PUT, `ossec.conf`
   patch with rollback, restart + verify). `--api-key-file` provisions the API key from a file
   (never on a command line); `--group` selects the trigger rule groups.
-- **Tests & CI** — 234 unit tests + `ruff`, run on every PR (Python 3.10 & 3.12); an end-to-end
+- **Distribution** — a one-line `bootstrap.sh` installer, versioned release tarballs, and `.deb` /
+  `.rpm` packages (built with `nfpm`) that stage the bundle for `apt`/`yum` and config management.
+  A tagged `v*` push builds all of them, with `SHA256SUMS`, into a GitHub Release.
+- **Tests & CI** — 236 unit tests + `ruff`, run on every PR (Python 3.10 & 3.12); an end-to-end
   acceptance runner (`tests/e2e/run_acceptance.py`, `make dev-acceptance`) exercising TC-01..TC-22
   against a live single-node stack.
-- **Docs** — [architecture](docs/architecture.md), the
+- **Docs** — [architecture](docs/architecture.md), an
+  [installation & configuration guide](docs/installation.md), the
   [Whisper→Wazuh mapping](docs/whisper-to-wazuh-mapping.md), the
   [acceptance criteria](docs/mvp-acceptance-criteria.md), and a captured
   [scenario](docs/scenarios/01-tor-ip-enrichment.md).

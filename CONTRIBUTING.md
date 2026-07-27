@@ -1,9 +1,9 @@
 # Contributing to whisper-wazuh
 
-Thanks for contributing! This project currently sits in
-**Milestone 0 — Requirement Analysis**, so scope, the integration pattern, and the
-Whisper→Wazuh data mapping are still being finalized. Some sections below (dev setup, tests)
-will firm up once Milestone 0 closes.
+Thanks for contributing! The integration is shipping (v1.0.0) — a per-alert enrichment connector,
+an on-demand investigation CLI, and the install/release tooling. If you're new here, read
+[docs/architecture.md](docs/architecture.md) for how it all fits together, then skim
+[docs/whisper-to-wazuh-mapping.md](docs/whisper-to-wazuh-mapping.md) for the field-level detail.
 
 ## Branching model
 
@@ -26,12 +26,12 @@ Suggested branch prefixes: `feat/`, `fix/`, `docs/`, `chore/`, `refactor/`, `tes
 
 ## Workflow
 
-1. Find or open an issue describing the change. Requirement-analysis work is tracked under
-   [Milestone 0](https://github.com/whisper-sec/whisper-wazuh/milestones).
+1. Find or open an issue describing the change. Work is tracked under the
+   [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones).
 2. Branch off `develop`: `git checkout develop && git pull && git checkout -b feat/my-change`.
 3. Make focused commits (see commit style below).
 4. Open a PR **targeting `develop`** (never push directly — protected branches reject it).
-5. Resolve all review conversations; CI (once added) must be green.
+5. Resolve all review conversations; CI must be green (ruff lint + format, pytest on 3.10 and 3.12).
 6. Squash or merge per the PR; delete the branch after merge.
 
 ## Branch protection (what to expect)
@@ -57,11 +57,28 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 Common types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`.
 
+## Dev setup
+
+The connector is **stdlib-only Python** (targets 3.10, the version the Wazuh manager ships) and
+POSIX-sh install scripts — no runtime dependencies. You only need dev tooling to lint and test:
+
+```bash
+pip install ruff==0.6.9 pytest        # ruff pinned exactly as CI does; pytest unpinned
+ruff check . && ruff format --check . && pytest -q
+```
+
+Run that before you open a PR — it's exactly what CI runs. `ruff` is configured in
+[pyproject.toml](pyproject.toml) (py310, line length 110, single quotes).
+
+To exercise the integration against a real stack, there's a single-node Wazuh (manager + indexer +
+dashboard) under [`dev/`](dev/). `make help` lists every target; `make dev-up` brings the stack up
+and `make dev-whisper-smoke` runs a quick connector check. See [dev/README.md](dev/README.md).
+
 ## Code style
 
-The implementation language and tooling will be finalized as Milestone 0 closes (expected
-Python 3.12 with `ruff` for lint/format and `pytest` for tests). Until then, keep
-contributions limited to docs and requirement-analysis artifacts.
+Match the surrounding code. Keep the connector dependency-free (stdlib only) so it runs on an
+unmodified manager, and keep the shell scripts POSIX `sh` (they run under `dash`/`busybox`) — the
+test suite parses them with `sh -n` to enforce it.
 
 ## Reporting issues
 
