@@ -156,9 +156,11 @@ alerts and connector test data.
 Install the `custom-whisper` integration into the dev manager and exercise it:
 
 ```bash
-make dev-whisper-install    # install (dev mode: test rule + template + refresh index)
-make dev-whisper-smoke      # inject a public IP + two guarded IPs, print the log evidence
-make dev-whisper-uninstall  # remove it and restore ossec.conf
+make dev-whisper-install       # install (dev mode: test rule + template + refresh index)
+make dev-whisper-smoke         # inject a public IP + two guarded IPs, print the log evidence
+make dev-demo-enrich           # inject one IOC (IOC=<value>, default a graph-listed Tor IP) and show the enrichment
+make dev-acceptance            # run the e2e acceptance suite (TC-01..TC-22) against the live stack (needs a real key)
+make dev-whisper-uninstall     # remove it and restore ossec.conf
 ```
 
 ### Whisper API key

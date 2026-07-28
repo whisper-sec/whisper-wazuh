@@ -3,6 +3,8 @@
 import json
 import os
 
+import whisper_client  # constants live here since the #33 client extraction
+
 
 class TestArgs:
     def test_too_few_args_exits_2(self, wi, log_lines):
@@ -56,14 +58,14 @@ class TestOptionsResolution:
         assert wi.resolve_dedup_ttl({}, os.environ) == 120
 
     def test_defaults(self, wi):
-        assert wi.resolve_api_url({}, {}) == wi.DEFAULT_API_URL
+        assert wi.resolve_api_url({}, {}) == whisper_client.DEFAULT_API_URL
         assert wi.resolve_dedup_ttl({}, {}) == wi.DEFAULT_DEDUP_TTL
 
     def test_bad_values_fall_through(self, wi):
         assert (
             wi.resolve_dedup_ttl({'dedup_ttl': 'soon'}, {'WHISPER_DEDUP_TTL': '-5'}) == wi.DEFAULT_DEDUP_TTL
         )
-        assert wi.resolve_api_url({'api_url': '   '}, {}) == wi.DEFAULT_API_URL
+        assert wi.resolve_api_url({'api_url': '   '}, {}) == whisper_client.DEFAULT_API_URL
 
     def test_json_boolean_ttl_never_becomes_one_second(self, wi):
         """int(True) == 1 — a well-meant '"dedup_ttl": true' must fall back to default."""
@@ -76,6 +78,45 @@ class TestOptionsResolution:
         bad = tmp_path / 'bad.json'
         bad.write_text('[1,2,3]')
         assert wi.load_options(str(bad)) == {}
+
+
+class TestExtraEnrichments:
+    """#32 — opt-in Tier-2 features: <options> list → env → default none; unknown ignored."""
+
+    def test_default_none(self, wi):
+        assert wi.resolve_extra_enrichments({}, {}) == frozenset()
+
+    def test_options_json_list(self, wi):
+        assert wi.resolve_extra_enrichments({'extra_enrichments': ['tls_fingerprint']}, {}) == {
+            'tls_fingerprint'
+        }
+
+    def test_options_comma_string(self, wi):
+        got = wi.resolve_extra_enrichments({'extra_enrichments': 'tls_fingerprint, foo'}, {})
+        assert got == {'tls_fingerprint'}  # unknown 'foo' filtered out
+
+    def test_env_fallback(self, wi):
+        got = wi.resolve_extra_enrichments({}, {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'})
+        assert got == {'tls_fingerprint'}
+
+    def test_options_beats_env(self, wi):
+        # a present (even empty) options list means "no extras", not "fall through to env"
+        got = wi.resolve_extra_enrichments(
+            {'extra_enrichments': []}, {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'}
+        )
+        assert got == frozenset()
+
+    def test_unknown_only_is_empty(self, wi):
+        assert wi.resolve_extra_enrichments({'extra_enrichments': ['bogus', 'nope']}, {}) == frozenset()
+
+    def test_malformed_present_value_does_not_defer_to_env(self, wi):
+        """A present-but-malformed options value (dict/int/bool) means 'no extras' — it must
+        NOT silently fall through to the env var (a config typo can't be env-overridden)."""
+        env = {'WHISPER_EXTRA_ENRICHMENTS': 'tls_fingerprint'}
+        for bad in ({}, 0, True, 3.14):
+            assert wi.resolve_extra_enrichments({'extra_enrichments': bad}, env) == frozenset(), bad
+        # absent key still falls through to env
+        assert wi.resolve_extra_enrichments({}, env) == {'tls_fingerprint'}
 
 
 class TestApiKeyResolution:
@@ -96,18 +137,16 @@ class TestApiKeyResolution:
 
     def test_placeholder_is_never_a_key(self, wi, tmp_path):
         key_file = tmp_path / 'whisper.key'
-        key_file.write_text(wi.API_KEY_PLACEHOLDER)
+        key_file.write_text(whisper_client.API_KEY_PLACEHOLDER)
         resolved = wi.resolve_api_key(
-            wi.API_KEY_PLACEHOLDER, {'WHISPER_API_KEY': wi.API_KEY_PLACEHOLDER}, str(key_file)
+            whisper_client.API_KEY_PLACEHOLDER,
+            {'WHISPER_API_KEY': whisper_client.API_KEY_PLACEHOLDER},
+            str(key_file),
         )
         assert resolved is None
 
-    def test_default_key_file_is_module_global_at_call_time(self, wi, tmp_path, monkeypatch):
-        """Monkeypatching wi.KEY_FILE must take effect (no def-time binding)."""
-        key_file = tmp_path / 'patched.key'
-        key_file.write_text('patched-key')
-        monkeypatch.setattr(wi, 'KEY_FILE', str(key_file))
-        assert wi.resolve_api_key('', {}) == 'patched-key'
+    # test_default_key_file_is_module_global_at_call_time moved to test_client.py
+    # (resolve_api_key + KEY_FILE now live in whisper_client, #33 extraction).
 
 
 class TestMainErrorSemantics:

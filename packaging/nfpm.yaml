@@ -1,0 +1,37 @@
+# nfpm config — builds the whisper-wazuh .deb and .rpm.  https://nfpm.goreleaser.com
+#   VERSION=1.0.0 nfpm package -f packaging/nfpm.yaml -p deb -t .
+#   VERSION=1.0.0 nfpm package -f packaging/nfpm.yaml -p rpm -t .
+#
+# The package stages the self-contained bundle to /usr/share/whisper-wazuh and adds /usr/bin
+# wrappers. It does NOT touch /var/ossec (that is the Wazuh package's territory) and does not
+# auto-activate — postinstall prints how to run whisper-wazuh-install. Arch is "all" (noarch):
+# the bundle is stdlib shell + Python, no compiled code.
+name: whisper-wazuh
+arch: all
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: Whisper Security <security@whisper.security>
+vendor: Whisper Security
+homepage: https://github.com/whisper-sec/whisper-wazuh
+license: Apache-2.0
+description: |
+  Whisper threat-intelligence enrichment integration for Wazuh.
+  Enriches Wazuh alerts with context from the Whisper infrastructure graph, and adds an
+  on-demand investigation CLI. Stage-only: run `whisper-wazuh-install` to activate on a manager.
+
+contents:
+  - src: ./integrations/whisper/
+    dst: /usr/share/whisper-wazuh/
+  - src: ./CHANGELOG.md
+    dst: /usr/share/whisper-wazuh/CHANGELOG.md
+  - src: ./packaging/whisper-wazuh-install
+    dst: /usr/bin/whisper-wazuh-install
+    file_info: { mode: 0755 }
+  - src: ./packaging/whisper-wazuh-uninstall
+    dst: /usr/bin/whisper-wazuh-uninstall
+    file_info: { mode: 0755 }
+
+scripts:
+  postinstall: ./packaging/postinstall.sh

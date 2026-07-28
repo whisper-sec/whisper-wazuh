@@ -19,19 +19,32 @@ Pipeline (all stages implemented): extract IOCs (#13) → dedup check (#15) → 
 the Whisper graph (#14) → inject a new alert onto the analysisd socket (#16) → record dedup.
 """
 
-import http.client
-import ipaddress
 import json
 import os
 import re
 import socket
 import sqlite3
-import ssl
 import sys
 import time
-import urllib.error
-import urllib.request
-from urllib.parse import urlsplit
+
+# Shared stdlib HTTP/TLS/auth client — the WAF-safe UA, CA-bundle resolution, retry taxonomy,
+# Whisper* exceptions, IOC primitives and config resolvers live here so the connector and the
+# analyst CLI (whisper-investigate) can never drift. Installed as a sibling in integrations/.
+import whisper_client
+from whisper_client import (
+    DEFAULT_RETRIES,
+    DEFAULT_TIMEOUT,
+    WhisperAuthError,
+    WhisperError,
+    WhisperQueryError,
+    WhisperTransportError,
+    classify_domain,
+    execute_query,
+    extract_url_host,
+    parse_ip,
+    resolve_api_key,
+    resolve_api_url,
+)
 
 # --- integratord argv contract (docs/whisper-to-wazuh-mapping.md §2.3) -----------------
 # argv[1] alert tmp file · argv[2] api_key · argv[3] hook_url (ignored, never validated;
@@ -45,8 +58,7 @@ OPTIONS_INDEX = 5
 TIMEOUT_INDEX = 6
 RETRIES_INDEX = 7
 
-DEFAULT_TIMEOUT = 10
-DEFAULT_RETRIES = 3
+# DEFAULT_TIMEOUT / DEFAULT_RETRIES imported from whisper_client.
 
 # Exit codes. 2/6/7 mirror the stock convention exactly (virustotal.py: ERR_BAD_ARGUMENTS,
 # ERR_FILE_NOT_FOUND, ERR_INVALID_JSON); 5 is reserved to match ERR_SOCKET_OPERATION for
@@ -63,16 +75,19 @@ INTEGRATION_NAME = 'custom-whisper'
 # install still resolves inside /var/ossec — mirrors the stock virustotal.py idiom.
 pwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 LOG_FILE = f'{pwd}/logs/integrations.log'
-KEY_FILE = f'{pwd}/etc/whisper.key'
 SOCKET_ADDR = f'{pwd}/queue/sockets/queue'
 DEDUP_DB = f'{pwd}/var/whisper/dedup.db'  # normative path — mapping §7.5
 MAX_EVENT_SIZE = 65535  # analysisd DGRAM datagram limit (matches maltiverse.py); errno 90 above it
 
 # --- configuration defaults (resolution: <options> JSON → environment → default) --------
-API_KEY_PLACEHOLDER = 'WHISPER_API_KEY_PLACEHOLDER'
-DEFAULT_API_URL = 'https://graph.whisper.security'
+# API_KEY_PLACEHOLDER / DEFAULT_API_URL / KEY_FILE imported from whisper_client.
 DEFAULT_DEDUP_TTL = 3600  # seconds — mapping §7.4
 DEFAULT_DEDUP_SCOPE = 'endpoint'  # 'endpoint' (key includes agent_id) | 'org' — mapping §7.2
+# Opt-in Tier-2 enrichments (#32). Each adds a query and/or has narrow, single-purpose
+# coverage, so all default OFF and are enabled individually via <options>.extra_enrichments.
+# tls_fingerprint: (ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT) — a Cobalt-Strike-default
+# JARM emitted only when present (a frozen, sparse catalog; absence is never rendered).
+KNOWN_EXTRA_ENRICHMENTS = frozenset({'tls_fingerprint'})
 
 # --- IOC extraction table (mapping §9, validated by issue #12 Q1 on 2026-07-06) ---------
 # One table, one row per path: (full dotted path from the alert root, hint, status).
@@ -134,39 +149,10 @@ FIELD_PATHS: 'tuple[tuple[str, str, str], ...]' = (
 MAX_LIST_VALUES = 10  # bound list-valued fields (some JSON decoders aggregate repeats)
 ORIGINAL_LOG_MAX = 512  # source_ref.original_full_log truncation — mapping §4.2
 
-# Conservative RFC-1035-ish shape check for domain-hinted values (lowercased, no trailing
-# dot): ≥2 labels; TLD alphabetic OR a punycode A-label (xn--…) so IDN domains as DNS
-# logs actually render them are not dropped. Values that fail are quietly debug-logged.
-_DOMAIN_RE = re.compile(
-    r'^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+' r'(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$'
-)
 
-
-# --- error taxonomy (mirrors whisper-opencti; drives the `error class=` log line) -------
-class WhisperError(Exception):
-    """Base for Whisper-boundary failures."""
-
-    log_class = 'query'
-
-
-class WhisperAuthError(WhisperError):
-    """401/403 — terminal: the same key fails for every candidate, so stop the run."""
-
-    log_class = 'auth'
-
-
-class WhisperTransportError(WhisperError):
-    """Network / 5xx / 429-after-retries — transient."""
-
-    log_class = 'transport'
-
-
-class WhisperQueryError(WhisperError):
-    """Other 4xx / malformed body — likely a connector bug."""
-
-    log_class = 'query'
-
-
+# _DOMAIN_RE and the WhisperError / Auth / Transport / Query taxonomy are imported from
+# whisper_client. WhisperSocketError is analysisd-only (the socket write-back, #16), so it
+# lives here and subclasses the imported base.
 class WhisperSocketError(WhisperError):
     """analysisd socket failures (errno 90 oversize, connect refused) — for #16."""
 
@@ -206,6 +192,11 @@ def log_api(url: str, ms: int) -> None:
     debug(f'whisper: api url={url} ms={ms}')
 
 
+# Route execute_query's per-call timing (emitted from whisper_client) through this connector's
+# debug log — gated by debug_enabled, so silent unless integratord passes 'debug'.
+whisper_client.log_api = log_api
+
+
 def log_error(exc: WhisperError) -> None:
     debug(f'whisper: error class={exc.log_class} detail={exc}')
 
@@ -225,14 +216,6 @@ def load_options(path: str) -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
-
-
-def resolve_api_url(options: dict, environ: dict) -> str:
-    """<options>.api_url → WHISPER_API_URL → default (mapping §2.3)."""
-    for candidate in (options.get('api_url'), environ.get('WHISPER_API_URL')):
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip().rstrip('/')
-    return DEFAULT_API_URL
 
 
 def resolve_dedup_ttl(options: dict, environ: dict) -> int:
@@ -268,29 +251,29 @@ def resolve_dedup_scope(options: dict, environ: dict) -> bool:
     return DEFAULT_DEDUP_SCOPE == 'endpoint'
 
 
-def resolve_api_key(argv_key: str, environ: dict, key_file: 'str | None' = None) -> 'str | None':
-    """WHISPER_API_KEY env → key file (640 root:wazuh) → argv[2]; placeholder never counts.
+def resolve_extra_enrichments(options: dict, environ: dict) -> 'frozenset[str]':
+    """The opt-in Tier-2 enrichments to run, intersected with KNOWN_EXTRA_ENRICHMENTS (#32).
 
-    Keeping the real key out of ossec.conf keeps it out of the integratord child's
-    /proc cmdline — scope §3.8 / acceptance TC-19. `key_file` defaults to the module
-    global at CALL time so tests can monkeypatch KEY_FILE.
+    <options>.extra_enrichments (JSON list, or comma string) → WHISPER_EXTRA_ENRICHMENTS
+    (comma-separated) → default none. Unknown names are ignored — a typo silently disables
+    the feature, never errors the run.
+
+    A PRESENT `extra_enrichments` key is authoritative regardless of shape: a valid list/string
+    is parsed, a malformed value (dict/int/bool) means "no extras" — it must NOT silently fall
+    through to the env var (that would let a config typo be overridden by a stale environment).
+    Only an ABSENT key falls through to the environment.
     """
-    if key_file is None:
-        key_file = KEY_FILE
-    env_key = environ.get('WHISPER_API_KEY', '').strip()
-    if env_key and env_key != API_KEY_PLACEHOLDER:
-        return env_key
-    try:
-        with open(key_file) as f:
-            file_key = f.read().strip()
-        if file_key and file_key != API_KEY_PLACEHOLDER:
-            return file_key
-    except OSError:
-        pass
-    argv_key = (argv_key or '').strip()
-    if argv_key and argv_key != API_KEY_PLACEHOLDER:
-        return argv_key
-    return None
+    if 'extra_enrichments' in options:
+        raw = options['extra_enrichments']
+        if isinstance(raw, (list, tuple)):
+            names = [str(x) for x in raw]
+        elif isinstance(raw, str):
+            names = raw.split(',')
+        else:
+            names = []  # present but malformed → no extras (do not defer to env)
+    else:
+        names = environ.get('WHISPER_EXTRA_ENRICHMENTS', '').split(',')
+    return frozenset(n.strip() for n in names if n.strip()) & KNOWN_EXTRA_ENRICHMENTS
 
 
 def _argv_int(args: 'list[str]', idx: int, default: int) -> int:
@@ -327,55 +310,7 @@ def is_self_alert(alert: dict) -> bool:
     return get_nested(alert, 'data.integration') == INTEGRATION_NAME
 
 
-def _strip_port(value: str) -> str:
-    """'1.2.3.4:56' → '1.2.3.4'; '[::1]:56' → '::1'; anything else unchanged.
-
-    Office 365 ClientIP (and other audit sources) frequently render peers as ip:port.
-    Bare IPv6 (multiple colons, no brackets) passes through untouched.
-    """
-    if value.startswith('[') and ']' in value:
-        return value[1 : value.index(']')]
-    if value.count(':') == 1:
-        host, _, port = value.partition(':')
-        if '.' in host and port.isdigit():
-            return host
-    return value
-
-
-def parse_ip(value: str) -> 'ipaddress.IPv4Address | ipaddress.IPv6Address | None':
-    """The ipaddress object for a raw field value, or None when it isn't an IP.
-
-    Strips an ip:port suffix and unwraps IPv4-mapped IPv6 (::ffff:a.b.c.d) — dual-stack
-    listeners log peers in mapped form, and the mapped range is not `is_global` even
-    when the embedded IPv4 is.
-    """
-    try:
-        ip = ipaddress.ip_address(_strip_port(value))
-    except ValueError:
-        return None
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return ip
-
-
-def classify_domain(value: str) -> 'str | None':
-    """Normalize + validate a domain-hinted value; None when it isn't a plausible domain."""
-    candidate = value.strip().rstrip('.').lower()
-    if _DOMAIN_RE.match(candidate):
-        return candidate
-    return None
-
-
-def extract_url_host(value: str) -> 'str | None':
-    """Host component of an ABSOLUTE url; None for path-only values (nginx/apache logs)."""
-    if '://' not in value:
-        return None
-    try:
-        return urlsplit(value).hostname or None
-    except ValueError:
-        return None
-
-
+# _strip_port / parse_ip / classify_domain / extract_url_host imported from whisper_client.
 def _classify(value: str, hint: str) -> 'tuple[str | None, str | None, str | None]':
     """Classify one raw string value per its path hint.
 
@@ -467,142 +402,6 @@ def build_source_ref(alert: dict, field_path: str) -> dict:
 # ==========================================================================================
 # #14 — Whisper client, enrichment builders & verdict derivation
 # ==========================================================================================
-
-# --- HTTP client (stdlib urllib; POST /api/query with bound parameters) ------------------
-# Bound parameters verified against the live API 2026-07-06 (incl. procedure args) — this
-# supersedes the older literal-inlining constraint documented from the opencti era.
-API_QUERY_PATH = '/api/query'
-CONNECTOR_VERSION = '1.0'
-# Must NOT start with 'Python-urllib' — the Whisper API WAF blocks that default UA (see below).
-USER_AGENT = f'whisper-wazuh-connector/{CONNECTOR_VERSION}'
-BACKOFF_BASE = 0.5
-BACKOFF_CAP = 60.0
-# Common CA-bundle locations, tried when the interpreter's compiled-in paths are empty.
-# The Wazuh framework Python's default verify paths point at /usr/local/ssl/cert.pem (absent),
-# so create_default_context() loads zero CAs and TLS verification would always fail. We keep
-# verification ON (scope §3.8) and locate a real bundle instead.
-_CA_BUNDLE_CANDIDATES = (
-    '/etc/ssl/certs/ca-certificates.crt',  # Debian/Ubuntu (Wazuh manager image)
-    '/etc/pki/tls/certs/ca-bundle.crt',  # RHEL/CentOS
-    '/etc/ssl/cert.pem',  # Alpine/BSD
-)
-
-
-def _ssl_context() -> 'ssl.SSLContext':
-    """A verifying TLS context that actually has CAs loaded, wherever the bundle lives.
-
-    Resolution: the interpreter default → `SSL_CERT_FILE` → well-known bundle paths → the
-    bundled `certifi` (ships with the framework Python). Verification stays ON throughout.
-    """
-    ctx = ssl.create_default_context()
-    if ctx.get_ca_certs():
-        return ctx
-    candidates = [os.environ.get('SSL_CERT_FILE'), *_CA_BUNDLE_CANDIDATES]
-    for path in candidates:
-        if path and os.path.exists(path):
-            try:
-                ctx.load_verify_locations(path)
-            except (ssl.SSLError, OSError):
-                continue
-            if ctx.get_ca_certs():  # an empty/placeholder PEM loads 0 certs without raising
-                return ctx
-    try:
-        import certifi  # bundled with the Wazuh framework Python; last-resort only
-
-        ctx.load_verify_locations(certifi.where())
-    except (ImportError, ssl.SSLError, OSError):
-        pass  # nothing found — verification will fail loudly (better than silently trusting all)
-    return ctx
-
-
-def _http_post(url: str, body: dict, headers: dict, timeout: int) -> 'tuple[int, bytes, dict]':
-    """Thin transport seam (tests monkeypatch this). Returns (status, raw, lower-cased headers)."""
-    req = urllib.request.Request(url, data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
-    ctx = _ssl_context() if url.startswith('https') else None
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310 — https URL from config
-            return resp.status, resp.read(), {k.lower(): v for k, v in resp.headers.items()}
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(), {k.lower(): v for k, v in (exc.headers or {}).items()}
-
-
-def _retry_after_seconds(headers: dict) -> 'float | None':
-    value = headers.get('retry-after')
-    if value is None:
-        return None
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def execute_query(
-    api_url: str,
-    api_key: 'str | None',
-    cypher: str,
-    params: 'dict | None' = None,
-    timeout: int = DEFAULT_TIMEOUT,
-    retries: int = DEFAULT_RETRIES,
-) -> 'list[dict]':
-    """POST one Cypher query; return `rows` (list of dicts keyed by column name).
-
-    Error taxonomy (drives the `error class=` log line):
-      401/403                    → WhisperAuthError (terminal)
-      429 / 5xx after retries    → WhisperTransportError (Retry-After honoured per attempt)
-      network failure            → WhisperTransportError
-      other 4xx / bad body       → WhisperQueryError
-    """
-    # An explicit User-Agent is REQUIRED: the Whisper API's WAF 403s urllib's default
-    # `Python-urllib/x.y` UA (verified live 2026-07-11). Any non-default UA passes.
-    headers = {'Content-Type': 'application/json', 'User-Agent': USER_AGENT}
-    if api_key:
-        headers['X-API-Key'] = api_key
-    body: dict = {'query': cypher}
-    if params:
-        body['parameters'] = params
-    url = f'{api_url}{API_QUERY_PATH}'
-
-    attempt = 0
-    while True:
-        started = time.monotonic()
-        try:
-            status, raw, resp_headers = _http_post(url, body, headers, timeout)
-        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
-            # http.client.HTTPException (BadStatusLine/IncompleteRead) is NOT an OSError —
-            # catch it explicitly so a garbled response stays inside the retry budget and
-            # the taxonomy instead of crashing main() with an unhandled traceback.
-            log_api(api_url, int((time.monotonic() - started) * 1000))
-            if attempt < retries:
-                attempt += 1
-                time.sleep(min(BACKOFF_BASE * (2 ** (attempt - 1)), BACKOFF_CAP))
-                continue
-            raise WhisperTransportError(f'network error after {retries} retries: {exc}') from exc
-        log_api(api_url, int((time.monotonic() - started) * 1000))
-
-        if status in (401, 403):
-            raise WhisperAuthError(f'HTTP {status} from Whisper API')
-        if status == 429 or status >= 500:
-            if attempt < retries:
-                attempt += 1
-                delay = _retry_after_seconds(resp_headers)
-                if delay is None:
-                    delay = BACKOFF_BASE * (2 ** (attempt - 1))
-                time.sleep(min(delay, BACKOFF_CAP))
-                continue
-            raise WhisperTransportError(f'HTTP {status} after {retries} retries')
-        if status >= 400:
-            raise WhisperQueryError(f'HTTP {status}: {raw[:500].decode("utf-8", "replace")}')
-
-        try:
-            parsed = json.loads(raw)
-        except ValueError as exc:
-            raise WhisperQueryError('non-JSON response body') from exc
-        if parsed.get('success') is False:
-            raise WhisperQueryError(str(parsed.get('error', 'unknown query error'))[:500])
-        rows = parsed.get('rows')
-        if not isinstance(rows, list):
-            raise WhisperQueryError('malformed response: missing rows')
-        return rows
 
 
 # --- explain() — the authoritative threat verdict (mapping §5/§6) -------------------------
@@ -944,8 +743,7 @@ _Q_IP_CONTEXT_V4 = (
     'OPTIONAL MATCH (ip)-[:HAS_COUNTRY]->(c:COUNTRY) '
     'OPTIONAL MATCH (ip)-[:LOCATED_IN]->(city:CITY) '
     'RETURN p.name AS prefix, a.name AS asn, an.name AS asn_name, '
-    'ac.name AS asn_country, c.name AS country, city.name AS city, '
-    + _IP_THREAT_RETURN + ' LIMIT 1'
+    'ac.name AS asn_country, c.name AS country, city.name AS city, ' + _IP_THREAT_RETURN + ' LIMIT 1'
 )
 _Q_IP_CONTEXT_V6 = (
     'MATCH (ip:IPV6 {name: $v}) '
@@ -954,8 +752,7 @@ _Q_IP_CONTEXT_V6 = (
     'OPTIONAL MATCH (a)-[:HAS_COUNTRY]->(ac:COUNTRY) '
     'OPTIONAL MATCH (ip)-[:LOCATED_IN]->(city:CITY) '
     'RETURN p.name AS prefix, a.name AS asn, an.name AS asn_name, '
-    'ac.name AS asn_country, city.name AS city, '
-    + _IP_THREAT_RETURN + ' LIMIT 1'
+    'ac.name AS asn_country, city.name AS city, ' + _IP_THREAT_RETURN + ' LIMIT 1'
 )
 
 
@@ -992,6 +789,47 @@ def _prefix_threat(ctx: dict) -> 'dict | None':
     if neighbors is not None:
         out['threat_neighbor_count'] = neighbors
     return out or None
+
+
+# Opt-in Tier-2 (#32): TLS-fingerprint clustering. Verified live 2026-07-12 that 100% of
+# EMITS_TLS_FINGERPRINT edges resolve to jarm/cobalt-strike-default, and ~97% of emitters read
+# clean in the threat feeds — so this catches C2 the feed layer misses. The two hops MUST be
+# split by `WITH t`: a single (ip)-[..]->(t)<-[..]-(co) pattern silently returns 0 rows. Emitted
+# only when the edge exists (the catalog is a frozen, sparse snapshot — never render absence).
+_Q_TLS_FINGERPRINT = (
+    'MATCH (ip:IPV4 {name: $v})-[:EMITS_TLS_FINGERPRINT]->(t:TLS_FINGERPRINT) '
+    'WITH t '
+    'MATCH (t)<-[:EMITS_TLS_FINGERPRINT]-(co:IPV4) '
+    'RETURN t.name AS fingerprint, t.kind AS kind, t.family AS family, '
+    'count(DISTINCT co) AS cluster_size ORDER BY cluster_size DESC'
+)
+
+
+def build_tls_fragment(cfg: dict, ioc: str) -> 'dict | None':
+    """TLS-fingerprint cluster for an IPv4, or None when the IP emits no fingerprint (#32).
+
+    `cluster_size` = how many IPs share this fingerprint — NOT a count of known-bad hosts
+    (co-emitters carry no independent feed signal; they are fellow-suspected CS servers by the
+    same JARM). `family` (e.g. cobalt-strike-default) is the actionable label a rule keys on.
+    """
+    rows = execute_query(
+        cfg['api_url'], cfg['api_key'], _Q_TLS_FINGERPRINT, {'v': ioc}, cfg['timeout'], cfg['retries']
+    )
+    if not rows:
+        return None
+    top = rows[0]
+    tls: dict = {}
+    if top.get('fingerprint'):
+        tls['fingerprint'] = top['fingerprint']
+    if top.get('kind'):
+        tls['kind'] = top['kind']
+    if top.get('family'):
+        tls['family'] = top['family']
+    if isinstance(top.get('cluster_size'), int):
+        tls['cluster_size'] = top['cluster_size']
+    if len(rows) > 1:  # IP emits multiple fingerprints — surface the top, note the rest
+        tls['count'] = len(rows)
+    return tls or None
 
 
 def build_ip_fragments(cfg: dict, ioc: str, ioc_type: str, flags: dict, notes: 'list[str]') -> dict:
@@ -1035,6 +873,15 @@ def build_ip_fragments(cfg: dict, ioc: str, ioc_type: str, flags: dict, notes: '
         fragments['prefix_threat'] = prefix_threat
     if geo:
         fragments['geo'] = geo
+    # Opt-in TLS fingerprint (#32) — own try so a failure never drops asn/prefix/geo above.
+    # IPv4 only (all EMITS_TLS_FINGERPRINT edges are on IPV4). Auth errors still propagate.
+    if ioc_type == 'ipv4' and 'tls_fingerprint' in cfg.get('extra', frozenset()):
+        try:
+            tls = build_tls_fragment(cfg, ioc)
+            if tls:
+                fragments['tls'] = tls
+        except (WhisperTransportError, WhisperQueryError):
+            notes.append('tls fingerprint lookup failed')
     # related.neighbors[] (reverse RESOLVES_TO / co-hosting) is deferred graph-wide — a plain
     # reverse traversal is rejected as an unanchored 2.6B-node scan (mapping §11 Q4). It is a
     # known non-goal, not per-alert unmapped data, so it is NOT noted here (keeps
@@ -1362,6 +1209,7 @@ def enrich(
     api_key: 'str | None',
     timeout: int,
     retries: int,
+    extra: 'frozenset[str]' = frozenset(),
 ) -> dict:
     """Build the full injection payload ({'integration': ..., 'whisper': {...}}) for one IOC.
 
@@ -1371,7 +1219,7 @@ def enrich(
     rather than discarding an already-computed verdict (auth errors still terminate). The
     whole datagram respects the 60 KB socket budget.
     """
-    cfg = {'api_url': api_url, 'api_key': api_key, 'timeout': timeout, 'retries': retries}
+    cfg = {'api_url': api_url, 'api_key': api_key, 'timeout': timeout, 'retries': retries, 'extra': extra}
     notes: list[str] = []
     trunc: list[str] = []
 
@@ -1637,6 +1485,7 @@ def main(args: 'list[str]') -> int:
     api_url = resolve_api_url(options, os.environ)
     dedup_ttl = resolve_dedup_ttl(options, os.environ)
     include_agent = resolve_dedup_scope(options, os.environ)
+    extra = resolve_extra_enrichments(options, os.environ)
     api_key = resolve_api_key(args[APIKEY_INDEX] if len(args) > APIKEY_INDEX else '', os.environ)
     timeout = _argv_int(args, TIMEOUT_INDEX, DEFAULT_TIMEOUT)
     retries = _argv_int(args, RETRIES_INDEX, DEFAULT_RETRIES)
@@ -1652,7 +1501,15 @@ def main(args: 'list[str]') -> int:
             continue
         try:
             payload = enrich(
-                ioc, ioc_type, key, build_source_ref(alert, field_path), api_url, api_key, timeout, retries
+                ioc,
+                ioc_type,
+                key,
+                build_source_ref(alert, field_path),
+                api_url,
+                api_key,
+                timeout,
+                retries,
+                extra,
             )
             sent = send_event(payload, alert.get('agent'))
             record_dedup(key, dedup_ttl)  # only after a successful emit — failures stay retryable

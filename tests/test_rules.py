@@ -17,7 +17,18 @@ def _rules(filename):
 class TestWhisperRules:
     def test_well_formed_and_ids(self):
         rules = _rules('whisper_rules.xml')
-        assert set(rules) == {'100200', '100201', '100202', '100203', '100204', '100205'}
+        assert set(rules) == {'100200', '100201', '100202', '100203', '100204', '100205', '100206'}
+
+    def test_tls_c2_rule(self):
+        """#32: the opt-in TLS-fingerprint rule escalates a Cobalt Strike JARM to level 12
+        INDEPENDENT of verdict (chains off the base classifier, not off a verdict rule)."""
+        r = _rules('whisper_rules.xml')['100206']
+        assert r.get('level') == '12'
+        assert r.find('if_sid').text == '100200'  # base classifier, NOT a verdict rule
+        field = r.find('field')
+        assert field.get('name') == 'whisper.tls.family'  # un-prefixed
+        assert field.get('type') == 'pcre2' and field.text == '^cobalt-strike-default$'
+        assert 'whisper_c2' in r.find('group').text
 
     def test_base_classifier(self):
         base = _rules('whisper_rules.xml')['100200']

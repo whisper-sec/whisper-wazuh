@@ -12,11 +12,14 @@
 # an existing managed block is removed and re-rendered with the current flags.
 #
 # Usage:
-#   install.sh [--group <csv>] [--dev] [--logs] [--skip-template] [--refresh-index]
-#              [--indexer-url URL] [--indexer-user USER] [--indexer-pass PASS]
+#   install.sh [--group <csv>] [--api-key-file PATH] [--dev] [--logs] [--skip-template]
+#              [--refresh-index] [--indexer-url URL] [--indexer-user USER] [--indexer-pass PASS]
 #
 #   --group <csv>     Rule groups that trigger enrichment (default: sshd). NEVER level-only,
 #                     and never a group the enrichment alerts themselves carry (loop guard).
+#   --api-key-file P  Install your Whisper API key from file P into /var/ossec/etc/whisper.key
+#                     (640 root:wazuh). The key never touches a command line. Omit to keep the
+#                     placeholder (then set the key file yourself, or use the WHISPER_API_KEY env).
 #   --dev             Dev mode: also install whisper_test_rules.xml and add the whisper_test
 #                     group to the trigger filter (domain-TC mechanism).
 #   --logs            Also install the whisper.online agent-activity LOG SOURCE (the keyed
@@ -55,6 +58,7 @@ DEV_MODE=0
 LOGS_MODE=0
 SKIP_TEMPLATE=0
 REFRESH_INDEX=0
+API_KEY_FILE_ARG=""
 INDEXER_URL_ARG="$(printf '%s' "${INDEXER_URL:-https://localhost:9200}" | tr -d '"')"
 INDEXER_USER_ARG="${INDEXER_USERNAME:-admin}"
 INDEXER_PASS_ARG="${INDEXER_PASSWORD:-}"
@@ -88,6 +92,7 @@ while [ $# -gt 0 ]; do
         --logs)          LOGS_MODE=1; shift ;;
         --skip-template) SKIP_TEMPLATE=1; shift ;;
         --refresh-index) REFRESH_INDEX=1; shift ;;
+        --api-key-file)  API_KEY_FILE_ARG="$2"; shift 2 ;;
         --indexer-url)   INDEXER_URL_ARG="$2"; shift 2 ;;
         --indexer-user)  INDEXER_USER_ARG="$2"; shift 2 ;;
         --indexer-pass)  INDEXER_PASS_ARG="$2"; shift 2 ;;
@@ -101,7 +106,7 @@ done
 [ -f "$OSSEC_CONF" ] || fail "$OSSEC_CONF not found"
 [ "$REFRESH_INDEX" = "1" ] && [ "$DEV_MODE" = "0" ] && fail "--refresh-index requires --dev (destructive)"
 
-REQUIRED="custom-whisper custom-whisper.py whisper_rules.xml whisper-template.json"
+REQUIRED="custom-whisper custom-whisper.py whisper_client.py whisper-investigate whisper-investigate.py whisper_rules.xml whisper-template.json"
 [ "$DEV_MODE" = "1" ] && REQUIRED="$REQUIRED whisper_test_rules.xml"
 [ "$LOGS_MODE" = "1" ] && REQUIRED="$REQUIRED whisper-logs whisper-logs.py whisper_agent_rules.xml"
 for f in $REQUIRED; do
@@ -111,7 +116,7 @@ mkdir -p "$WAZUH_PATH/tmp" || fail "cannot create $WAZUH_PATH/tmp"
 
 # Loop guard: the trigger filter must never watch a group the enrichment alerts carry
 # (mapping section 8; the emitted rules sit in whisper,whisper_enrichment,whisper_<verdict>).
-EMITTED_GROUPS="whisper whisper_enrichment whisper_known_bad whisper_suspicious whisper_known_good whisper_unknown"
+EMITTED_GROUPS="whisper whisper_enrichment whisper_known_bad whisper_suspicious whisper_known_good whisper_unknown whisper_c2"
 for token in $(printf '%s' "$GROUPS_CSV" | tr ',' ' '); do
     for emitted in $EMITTED_GROUPS; do
         [ "$token" = "$emitted" ] && fail "--group '$token' would create a feedback loop (enrichment alerts carry that group)"
@@ -142,9 +147,17 @@ fi
 
 # ---- 1. integration script + wrapper (750 root:wazuh) --------------------------------
 log "installing integration script -> $WAZUH_PATH/integrations/"
-cp "$SRC_DIR/custom-whisper" "$SRC_DIR/custom-whisper.py" "$WAZUH_PATH/integrations/" || fail "cp integration script failed"
-chown root:wazuh "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py"
-chmod 750 "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py"
+cp "$SRC_DIR/custom-whisper" "$SRC_DIR/custom-whisper.py" "$SRC_DIR/whisper_client.py" \
+   "$SRC_DIR/whisper-investigate" "$SRC_DIR/whisper-investigate.py" "$WAZUH_PATH/integrations/" \
+    || fail "cp integration script failed"
+chown root:wazuh "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py" \
+    "$WAZUH_PATH/integrations/whisper_client.py" \
+    "$WAZUH_PATH/integrations/whisper-investigate" "$WAZUH_PATH/integrations/whisper-investigate.py"
+# Executables 750 (integratord runs custom-whisper; analysts run whisper-investigate); the
+# imported modules 640 (read, not executed).
+chmod 750 "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom-whisper.py" \
+    "$WAZUH_PATH/integrations/whisper-investigate" "$WAZUH_PATH/integrations/whisper-investigate.py"
+chmod 640 "$WAZUH_PATH/integrations/whisper_client.py"
 if [ "$LOGS_MODE" = "1" ]; then
     log "installing log-source poller -> $WAZUH_PATH/integrations/whisper-logs[.py]"
     cp "$SRC_DIR/whisper-logs" "$SRC_DIR/whisper-logs.py" "$WAZUH_PATH/integrations/" || fail "cp whisper-logs failed"
@@ -171,8 +184,18 @@ if [ "$DEV_MODE" = "1" ]; then
 fi
 
 # ---- 3. key file (640 root:wazuh; placeholder never counts as a key) ------------------
-if [ ! -f "$KEY_FILE" ]; then
-    log "creating $KEY_FILE with placeholder (put your real Whisper API key in it)"
+# --api-key-file installs the real key straight from a file (the key never appears on any
+# command line — safer than an argv flag). Otherwise: create a placeholder if none exists,
+# and leave an existing key file untouched (a reinstall keeps the operator's key).
+if [ -n "$API_KEY_FILE_ARG" ]; then
+    [ -f "$API_KEY_FILE_ARG" ] || fail "--api-key-file: $API_KEY_FILE_ARG not found"
+    KEY_CONTENT="$(head -n1 "$API_KEY_FILE_ARG" | tr -d ' \t\r\n')"
+    [ -n "$KEY_CONTENT" ] && [ "$KEY_CONTENT" != "$PLACEHOLDER" ] \
+        || fail "--api-key-file: $API_KEY_FILE_ARG is empty or holds the placeholder"
+    log "installing the provided API key -> $KEY_FILE (640 root:wazuh)"
+    printf '%s\n' "$KEY_CONTENT" > "$KEY_FILE" || fail "cannot write $KEY_FILE"
+elif [ ! -f "$KEY_FILE" ]; then
+    log "creating $KEY_FILE with placeholder (put your real Whisper API key in it, or use --api-key-file)"
     printf '%s\n' "$PLACEHOLDER" > "$KEY_FILE" || fail "cannot write $KEY_FILE"
 fi
 chown root:wazuh "$KEY_FILE"

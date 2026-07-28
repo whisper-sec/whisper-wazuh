@@ -65,146 +65,6 @@ def make_cfg_args():
     return ('https://graph.whisper.security', 'test-key', 10, 3)
 
 
-class TestHttpClient:
-    """execute_query transport behavior via the _http_post seam."""
-
-    def _client(self, wi, monkeypatch, responses, sleeps=None):
-        seq = iter(responses)
-        monkeypatch.setattr(wi, '_http_post', lambda *a, **k: next(seq))
-        if sleeps is not None:
-            monkeypatch.setattr(wi.time, 'sleep', lambda s: sleeps.append(s))
-
-    def test_success_returns_rows(self, wi, monkeypatch):
-        body = json.dumps({'columns': ['x'], 'rows': [{'x': 1}]}).encode()
-        self._client(wi, monkeypatch, [(200, body, {})])
-        assert wi.execute_query('u', 'k', 'RETURN 1') == [{'x': 1}]
-
-    def test_auth_error_never_retried(self, wi, monkeypatch):
-        sleeps = []
-        self._client(wi, monkeypatch, [(401, b'', {})], sleeps)
-        with pytest.raises(wi.WhisperAuthError):
-            wi.execute_query('u', 'k', 'RETURN 1')
-        assert sleeps == []
-
-    def test_5xx_retried_then_transport_error(self, wi, monkeypatch):
-        sleeps = []
-        self._client(wi, monkeypatch, [(500, b'', {})] * 4, sleeps)
-        with pytest.raises(wi.WhisperTransportError):
-            wi.execute_query('u', 'k', 'RETURN 1', retries=3)
-        assert len(sleeps) == 3  # backoff between each retry
-
-    def test_429_honours_retry_after(self, wi, monkeypatch):
-        sleeps = []
-        ok = json.dumps({'rows': []}).encode()
-        self._client(wi, monkeypatch, [(429, b'', {'retry-after': '7'}), (200, ok, {})], sleeps)
-        assert wi.execute_query('u', 'k', 'RETURN 1') == []
-        assert sleeps == [7.0]
-
-    def test_other_4xx_is_query_error(self, wi, monkeypatch):
-        self._client(wi, monkeypatch, [(400, b'bad cypher', {})])
-        with pytest.raises(wi.WhisperQueryError):
-            wi.execute_query('u', 'k', 'RETURN 1')
-
-    def test_success_false_body_is_query_error(self, wi, monkeypatch):
-        body = json.dumps({'success': False, 'error': 'nope'}).encode()
-        self._client(wi, monkeypatch, [(200, body, {})])
-        with pytest.raises(wi.WhisperQueryError):
-            wi.execute_query('u', 'k', 'RETURN 1')
-
-    def test_bound_parameters_sent(self, wi, monkeypatch):
-        captured = {}
-
-        def fake_post(url, body, headers, timeout):
-            captured.update(body)
-            return 200, json.dumps({'rows': []}).encode(), {}
-
-        monkeypatch.setattr(wi, '_http_post', fake_post)
-        wi.execute_query('u', 'k', 'MATCH (n {name: $v}) RETURN n', {'v': 'x'})
-        assert captured['parameters'] == {'v': 'x'}
-
-    def test_explicit_user_agent_sent(self, wi, monkeypatch):
-        """The Whisper WAF 403s urllib's default 'Python-urllib' UA — we must send our own."""
-        captured = {}
-
-        def fake_post(url, body, headers, timeout):
-            captured.update(headers)
-            return 200, json.dumps({'rows': []}).encode(), {}
-
-        monkeypatch.setattr(wi, '_http_post', fake_post)
-        wi.execute_query('u', 'k', 'RETURN 1')
-        assert captured.get('User-Agent') == wi.USER_AGENT
-        assert not captured['User-Agent'].lower().startswith('python-urllib')
-
-    def test_ssl_context_uses_interpreter_default_when_populated(self, wi, monkeypatch):
-        class FakeCtx:
-            def get_ca_certs(self):
-                return [{'x': 1}]  # non-empty → default is fine, no fallback
-
-        monkeypatch.setattr(wi.ssl, 'create_default_context', lambda: FakeCtx())
-        assert isinstance(wi._ssl_context(), FakeCtx)
-
-    def test_ssl_context_loads_bundle_when_default_empty(self, wi, tmp_path, monkeypatch):
-        """Wazuh framework Python: default context has zero CAs → load a real bundle,
-        keeping verification ON (scope §3.8)."""
-        bundle = tmp_path / 'ca.crt'
-        bundle.write_text('-----BEGIN CERTIFICATE-----')
-        loaded = []
-
-        class FakeCtx:
-            def get_ca_certs(self):
-                return loaded  # empty until a bundle is loaded, then non-empty (real behavior)
-
-            def load_verify_locations(self, path):
-                loaded.append(path)
-
-        monkeypatch.setattr(wi.ssl, 'create_default_context', lambda: FakeCtx())
-        monkeypatch.setattr(wi, '_CA_BUNDLE_CANDIDATES', (str(bundle),))
-        monkeypatch.delenv('SSL_CERT_FILE', raising=False)
-        wi._ssl_context()
-        assert loaded == [str(bundle)]  # located and loaded the bundle
-
-    def test_ssl_context_prefers_ssl_cert_file_env(self, wi, tmp_path, monkeypatch):
-        env_bundle = tmp_path / 'env-ca.crt'
-        env_bundle.write_text('x')
-        loaded = []
-
-        class FakeCtx:
-            def get_ca_certs(self):
-                return loaded
-
-            def load_verify_locations(self, path):
-                loaded.append(path)
-
-        monkeypatch.setattr(wi.ssl, 'create_default_context', lambda: FakeCtx())
-        monkeypatch.setattr(wi, '_CA_BUNDLE_CANDIDATES', ('/nonexistent/ca.crt',))
-        monkeypatch.setenv('SSL_CERT_FILE', str(env_bundle))
-        wi._ssl_context()
-        assert loaded == [str(env_bundle)]  # SSL_CERT_FILE wins over the well-known paths
-
-    def test_http_exception_stays_in_taxonomy(self, wi, monkeypatch):
-        """BadStatusLine/IncompleteRead are not OSError — must not escape as a raw crash."""
-        import http.client
-
-        sleeps = []
-
-        def boom(*a, **k):
-            raise http.client.BadStatusLine('garbage')
-
-        monkeypatch.setattr(wi, '_http_post', boom)
-        monkeypatch.setattr(wi.time, 'sleep', lambda s: sleeps.append(s))
-        with pytest.raises(wi.WhisperTransportError):
-            wi.execute_query('u', 'k', 'RETURN 1', retries=2)
-        assert len(sleeps) == 2  # retried within budget, not crashed
-
-    def test_first_backoff_is_base(self, wi, monkeypatch):
-        sleeps = []
-        seq = iter([(500, b'', {}), (200, json.dumps({'rows': []}).encode(), {})])
-        monkeypatch.setattr(wi, '_http_post', lambda *a, **k: next(seq))
-        monkeypatch.setattr(wi.time, 'sleep', lambda s: sleeps.append(s))
-        wi.execute_query('u', 'k', 'RETURN 1')
-        assert sleeps == [wi.BACKOFF_BASE]  # 0.5s, not 1.0s
-
-
 class TestCallExplain:
     def test_genuine_400_raises_original_not_fallback(self, wi, monkeypatch):
         """Both shapes fail → surface the RICH query's error, not the fallback's."""
@@ -266,6 +126,65 @@ class TestFragmentDegradation:
         monkeypatch.setattr(wi, 'fetch_flags', boom)
         with pytest.raises(wi.WhisperAuthError):
             wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())
+
+    def _wire_tor_ip(self, router, belongs):
+        router.add('CALL explain', [TOR_EXPLAIN], ioc='185.220.101.1')
+        router.add('CALL explain', [{'available': True, 'found': True, 'breakdown': None}], ioc='AS60729')
+        router.add('RETURN n.isThreat', [TOR_FLAGS])
+        router.add('BELONGS_TO', [belongs])
+
+    def test_tls_failure_keeps_core_fragments(self, wi, router, monkeypatch):
+        """#32: an opt-in TLS query failure degrades with a note and NEVER drops the core
+        asn/prefix/geo fragments or the verdict (its own try, after the core is built)."""
+        self._wire_tor_ip(
+            router,
+            {
+                'prefix': '185.220.101.0/24',
+                'asn': 'AS60729',
+                'asn_name': None,
+                'asn_country': 'DE',
+                'country': 'DE',
+                'city': None,
+                'prefix_threat_level': 'CRITICAL',
+                'prefix_threat_score': 14,
+                'prefix_is_threat': True,
+                'prefix_threat_neighbors': 3,
+            },
+        )
+        monkeypatch.setattr(
+            wi, 'build_tls_fragment', lambda *a, **k: (_ for _ in ()).throw(wi.WhisperTransportError('flaky'))
+        )
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(), frozenset({'tls_fingerprint'}))[
+            'whisper'
+        ]
+        assert w['verdict'] == 'suspicious'  # verdict survived
+        assert w['asn']['number'] == 60729  # core asn survived
+        assert w['prefix_threat']['level'] == 'CRITICAL'  # core prefix survived
+        assert 'tls' not in w  # only tls dropped
+        assert 'tls fingerprint lookup failed' in w['unmapped_summary']
+
+    def test_tls_auth_error_terminates(self, wi, router, monkeypatch):
+        """An auth error from the opt-in TLS query is terminal — it propagates, never degraded."""
+        self._wire_tor_ip(
+            router,
+            {
+                'prefix': '185.220.101.0/24',
+                'asn': 'AS60729',
+                'asn_name': None,
+                'asn_country': 'DE',
+                'country': 'DE',
+                'city': None,
+                'prefix_threat_level': 'NONE',
+                'prefix_threat_score': 0,
+                'prefix_is_threat': False,
+                'prefix_threat_neighbors': 0,
+            },
+        )
+        monkeypatch.setattr(
+            wi, 'build_tls_fragment', lambda *a, **k: (_ for _ in ()).throw(wi.WhisperAuthError('403'))
+        )
+        with pytest.raises(wi.WhisperAuthError):
+            wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(), frozenset({'tls_fingerprint'}))
 
 
 class TestFeedPolarity:
@@ -333,8 +252,15 @@ class TestVerdictDerivation:
         """#30: a confirmed-malicious node flag is known_bad on its own — no HIGH level or
         confirmed-bad feed CATEGORY required (the node IS bad infrastructure)."""
         row = {'available': True, 'found': True, 'level': 'NONE', 'sources': []}
-        for flag in ('isC2', 'isMalware', 'isPhishing', 'isBotnet',
-                     'isExfilDestination', 'isOfacSanctioned', 'isStateActor'):
+        for flag in (
+            'isC2',
+            'isMalware',
+            'isPhishing',
+            'isBotnet',
+            'isExfilDestination',
+            'isOfacSanctioned',
+            'isStateActor',
+        ):
             assert wi.derive_verdict(row, {flag: True}) == 'known_bad', flag
 
     def test_generic_threat_flag_stays_suspicious(self, wi):
@@ -461,29 +387,129 @@ class TestIpEnrichment:
         round-trip). Verified live 2026-07-11: the /24 reads CRITICAL while its ASN aggregate
         reads NONE — the granular prefix signal is the actionable one (ASN aggregate dropped as
         noise: only 2/116k ASNs carry a non-NONE level)."""
-        self._wire_threat_ip(router, {
-            'prefix': '185.220.101.0/24', 'asn': 'AS60729', 'asn_name': None,
-            'asn_country': 'DE', 'country': 'DE', 'city': None,
-            'prefix_threat_level': 'CRITICAL', 'prefix_threat_score': 14,
-            'prefix_is_threat': True, 'prefix_threat_neighbors': 151,
-        })
+        self._wire_threat_ip(
+            router,
+            {
+                'prefix': '185.220.101.0/24',
+                'asn': 'AS60729',
+                'asn_name': None,
+                'asn_country': 'DE',
+                'country': 'DE',
+                'city': None,
+                'prefix_threat_level': 'CRITICAL',
+                'prefix_threat_score': 14,
+                'prefix_is_threat': True,
+                'prefix_threat_neighbors': 151,
+            },
+        )
         w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
         assert w['prefix_threat'] == {
-            'level': 'CRITICAL', 'score': 14, 'is_threat': True, 'threat_neighbor_count': 151,
+            'level': 'CRITICAL',
+            'score': 14,
+            'is_threat': True,
+            'threat_neighbor_count': 151,
         }
         assert 'threat' not in w['asn']  # ASN-level aggregate deliberately not emitted
 
     def test_benign_prefix_stays_quiet(self, wi, router):
         """A listed IP whose registered prefix carries no threat signal must NOT sprout an
         empty prefix_threat block (the quiet-level gate)."""
-        self._wire_threat_ip(router, {
-            'prefix': '8.8.8.0/24', 'asn': 'AS15169', 'asn_name': 'GOOGLE',
-            'asn_country': 'US', 'country': 'US', 'city': None,
-            'prefix_threat_level': 'NONE', 'prefix_threat_score': 0,
-            'prefix_is_threat': False, 'prefix_threat_neighbors': 0,
-        })
+        self._wire_threat_ip(
+            router,
+            {
+                'prefix': '8.8.8.0/24',
+                'asn': 'AS15169',
+                'asn_name': 'GOOGLE',
+                'asn_country': 'US',
+                'country': 'US',
+                'city': None,
+                'prefix_threat_level': 'NONE',
+                'prefix_threat_score': 0,
+                'prefix_is_threat': False,
+                'prefix_threat_neighbors': 0,
+            },
+        )
         w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
         assert 'prefix_threat' not in w
+
+    _BENIGN_BELONGS = {
+        'prefix': '198.51.100.0/24',
+        'asn': 'AS64500',
+        'asn_name': None,
+        'asn_country': None,
+        'country': None,
+        'city': None,
+        'prefix_threat_level': 'NONE',
+        'prefix_threat_score': 0,
+        'prefix_is_threat': False,
+        'prefix_threat_neighbors': 0,
+    }
+    _CS_JARM = {
+        'fingerprint': 'jarm:07d14d16d21d21d07c42d41d00041d24a458a375eef0c576d23a7bab9a9fb1',
+        'kind': 'jarm',
+        'family': 'cobalt-strike-default',
+        'cluster_size': 139,
+    }
+
+    def test_tls_fingerprint_opt_in_emitted(self, wi, router):
+        """#32: with tls_fingerprint enabled, a CS-JARM edge surfaces as data.whisper.tls.*
+        (the actionable field is family='cobalt-strike-default')."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        router.add('EMITS_TLS_FINGERPRINT', [dict(self._CS_JARM)])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(), frozenset({'tls_fingerprint'}))[
+            'whisper'
+        ]
+        assert w['tls'] == self._CS_JARM
+
+    def test_tls_fingerprint_off_by_default(self, wi, router):
+        """No opt-in → the TLS query never runs and no tls field is emitted."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        router.add('EMITS_TLS_FINGERPRINT', [dict(self._CS_JARM)])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args())['whisper']
+        assert 'tls' not in w
+        assert not any('EMITS_TLS_FINGERPRINT' in c for c, _ in router.calls)
+
+    def test_tls_fingerprint_absent_when_no_edge(self, wi, router):
+        """Enabled but the IP emits no fingerprint → field omitted (absence never rendered)."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        # no EMITS_TLS_FINGERPRINT route → query returns [] → build_tls_fragment None
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(), frozenset({'tls_fingerprint'}))[
+            'whisper'
+        ]
+        assert 'tls' not in w
+
+    def test_tls_fingerprint_multiple_adds_count(self, wi, router):
+        """An IP emitting >1 fingerprint surfaces the top (highest cluster_size) + a count."""
+        self._wire_threat_ip(router, dict(self._BENIGN_BELONGS))
+        router.add(
+            'EMITS_TLS_FINGERPRINT',
+            [
+                dict(self._CS_JARM),
+                {
+                    'fingerprint': 'jarm:other',
+                    'kind': 'jarm',
+                    'family': 'cobalt-strike-default',
+                    'cluster_size': 3,
+                },
+            ],
+        )
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {}, *make_cfg_args(), frozenset({'tls_fingerprint'}))[
+            'whisper'
+        ]
+        assert w['tls']['fingerprint'] == self._CS_JARM['fingerprint'] and w['tls']['count'] == 2
+
+    def test_tls_fingerprint_ipv4_only(self, wi, router):
+        """EMITS_TLS_FINGERPRINT lives on IPV4 — the query must not run for an IPv6 IOC."""
+        router.add('IPV6', [{}])  # ipv6 context query → empty ctx
+        cfg = {
+            'api_url': 'u',
+            'api_key': 'k',
+            'timeout': 10,
+            'retries': 3,
+            'extra': frozenset({'tls_fingerprint'}),
+        }
+        wi.build_ip_fragments(cfg, '2001:db8::1', 'ipv6', {}, [])
+        assert not any('EMITS_TLS_FINGERPRINT' in c for c, _ in router.calls)
 
 
 class TestDomainEnrichment:

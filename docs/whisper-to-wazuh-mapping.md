@@ -1,6 +1,6 @@
 # Whisper → Wazuh data & field mapping
 
-**Status:** Milestone 0 — Requirement Analysis · target **Wazuh 4.14.5** · resolves
+**Status:** shipped in **v1.0.0** · verified on **Wazuh 4.14.5** · resolves
 [#3](https://github.com/whisper-sec/whisper-wazuh/issues/3)
 
 Wazuh has no STIX-native sink. This spec defines how results from the Whisper infrastructure
@@ -185,9 +185,11 @@ Verified against `virustotal.py` / `maltiverse.py` @ v4.14.5:
   `argv[6]` = timeout (default `10`) · `argv[7]` = retries (default `3`) ·
   plus a literal trailing `> /dev/null 2>&1` argument when debug is off — **read args
   positionally, never rely on `argc`.** The `<options>` JSON (argv[5]) is the config channel for
-  `api_url`, `dedup_ttl` and `dedup_scope` (`endpoint` | `org` — §7.2); resolution order:
-  options → environment (`WHISPER_API_URL` / `WHISPER_DEDUP_TTL` / `WHISPER_DEDUP_SCOPE`) →
-  built-in default. Scripts live in `/var/ossec/integrations/`, perms `750`, owner `root:wazuh`.
+  `api_url`, `dedup_ttl`, `dedup_scope` (`endpoint` | `org` — §7.2), and `extra_enrichments`
+  (a JSON list of opt-in Tier-2 features, default none — §12); resolution order: options →
+  environment (`WHISPER_API_URL` / `WHISPER_DEDUP_TTL` / `WHISPER_DEDUP_SCOPE` /
+  `WHISPER_EXTRA_ENRICHMENTS`) → built-in default. Scripts live in `/var/ossec/integrations/`,
+  perms `750`, owner `root:wazuh`.
 
 ### 2.4 How `data.whisper.*` lands in the indexer
 
@@ -346,8 +348,8 @@ fields and relies on OpenSearch **coercion** of the stringified values (verified
   so it rides on top of the stock one (merge verified live: stock fields keep their mappings).
   **Never convert it to a composable `_index_template`** — a matching composable template
   silently *disables* all legacy templates for that index, nuking the entire stock mapping.
-- Install (**before the first enrichment alert** — this PUT becomes a step of #18's
-  `install.sh`, which does not exist yet):
+- Install (**before the first enrichment alert** — `install.sh` does this PUT as its first step,
+  so an unreachable indexer aborts the install before the manager is touched):
 
   ```bash
   curl -sk -u <user>:<pass> -XPUT "https://<indexer>:9200/_template/whisper" \
@@ -365,7 +367,7 @@ fields and relies on OpenSearch **coercion** of the stringified values (verified
 | Field | Type |
 |---|---|
 | `risk_score`, `variants.confidence`, `asn.reputation.*`, `prefix_threat.score` | `float` |
-| `asn.number`, `threat_feed.sources_count`, `links.inbound_total`/`outbound_total`/`suspicious_count`, `prefix_threat.threat_neighbor_count` | `long` |
+| `asn.number`, `threat_feed.sources_count`, `links.inbound_total`/`outbound_total`/`suspicious_count`, `prefix_threat.threat_neighbor_count`, `tls.cluster_size`/`count` | `long` |
 | `known`, `available`, `truncated`, `coverage.shared_host`, `prefix_threat.is_threat` | `boolean` |
 | `threat_feed.first_seen`/`last_seen` | `date` |
 
@@ -472,6 +474,7 @@ IPv6 has **no `HAS_COUNTRY` edge** — its country comes via `LOCATED_IN → CIT
 | `(ip)-[:BELONGS_TO]->(:PREFIX).name` | `prefix` | keyword | RIR/announced prefix (CIDR). |
 | `(ip)-[:BELONGS_TO]->(:PREFIX)` threat props (`threatLevel,threatScore,isThreat,threatNeighborCount`) | `prefix_threat.{level,score,is_threat,threat_neighbor_count}` | object | **#29 — rides the same `BELONGS_TO→PREFIX` traversal (no extra round-trip).** The registered prefix carries its own threat verdict independent of the ASN aggregate (verified `185.220.101.0/24` → `CRITICAL, 151 neighbors` while `AS60729` reads `NONE`), so the granular /prefix/ signal is the actionable one. **Signal-gated:** omitted entirely for benign prefixes (a `NONE` level is not emitted). ASN-level aggregate deliberately not emitted (only 2/116 k ASNs carry a non-`NONE` level; noise for hyperscalers — `asn.reputation` already scores the ASN). BGP-hijack (announced≠registered ASN) → the `bgp-hijack-exposure` on-demand workflow, not per-alert (legitimate MOAS is common). |
 | reverse `RESOLVES_TO` / co-host | `related.neighbors[]` + `related.neighbors_total` | object[] + int | **Deferred / best-effort — see §11.** A plain reverse `MATCH (h:HOSTNAME)-[:RESOLVES_TO]->(ip {name})` is rejected as an unanchored 2.6 B-node scan; needs a co-hosting workflow or passive-DNS path. Omit (with a note in `unmapped_summary`) if unavailable. |
+| `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)` | `tls.{fingerprint,kind,family,cluster_size,count}` | object | **#32 — OPT-IN (`extra_enrichments: ["tls_fingerprint"]`, §12), IPv4 only.** A JARM match; `family` (e.g. `cobalt-strike-default`) is the actionable C2 label rule 100206 keys on. `cluster_size` = IPs sharing the fingerprint (NOT a known-bad count). **Emitted only when the edge exists** — the catalog is a frozen, sparse snapshot, so absence is never rendered. Verified live: `64.227.45.20` → CS-default JARM (cluster 139) while its verdict reads `unknown` — catches C2 the feeds miss. |
 
 ### 5.2 Domain
 
@@ -605,6 +608,13 @@ mirroring `0490-virustotal_rules.xml` (VT uses level 12 for malicious, 3 for ben
     <description>Whisper: no graph data for $(whisper.ioc)</description>
   </rule>
 
+  <!-- #32 opt-in: escalates a Cobalt Strike JARM INDEPENDENT of verdict (usually 'unknown') -->
+  <rule id="100206" level="12">
+    <if_sid>100200</if_sid>
+    <field name="whisper.tls.family" type="pcre2">^cobalt-strike-default$</field>
+    <description>Whisper: $(whisper.ioc) emits a Cobalt Strike default JARM fingerprint (possible C2)</description>
+  </rule>
+
 </group>
 ```
 
@@ -614,6 +624,7 @@ mirroring `0490-virustotal_rules.xml` (VT uses level 12 for malicious, 3 for ben
 | `suspicious` | 7 | analyst-review band |
 | `known_good` | 3 | low-noise informational |
 | `unknown` | 3 (set to 0 to suppress — a noise-policy call, §11 Q8) | informational |
+| — (TLS C2, rule 100206) | 12, **verdict-independent** | opt-in `tls.family == cobalt-strike-default`; fires even when the verdict is `unknown` (feeds miss it), §12 |
 
 Two matching subtleties, both handled above:
 
@@ -789,9 +800,11 @@ allows); historical-alert backfill (indexer-side reader); optional upstream to `
 
 ---
 
-## 11. Open questions
+## 11. Design questions (from the research pass)
 
-Flagged by the research pass; to resolve before/while implementing:
+Flagged during requirement analysis. Kept here as the decision log — about half (items 1–3, 5, 9)
+were resolved before or during the v1.0.0 build (struck through, with the resolving issue); the rest
+are settled type/noise-policy calls or items deferred post-MVP, noted inline on each:
 
 1. ~~**`SUPPORTED_FIELD_PATHS` validation.**~~ **Resolved (#12 Q1, 2026-07-06):** the §9 table
    is now validated against the live dev stack + 4.14.5 template/ruleset source; wrong
@@ -831,7 +844,80 @@ Flagged by the research pass; to resolve before/while implementing:
 
 ---
 
-## 12. Log source — agent activity → Wazuh (keyed tier, #35)
+## 12. Opt-in Tier-2 enrichments (Milestone 2 / #32)
+
+Heavier or narrow-coverage graph pivots that are **OFF by default** and enabled individually via
+`<options>.extra_enrichments` (a JSON list) or `WHISPER_EXTRA_ENRICHMENTS` (comma-separated). An
+unknown name is silently ignored (a typo disables, never errors). Enable example:
+
+```xml
+<integration>
+  <name>custom-whisper</name>
+  <group>sshd</group>
+  <alert_format>json</alert_format>
+  <options>{"extra_enrichments":["tls_fingerprint"]}</options>
+</integration>
+```
+
+**Shipped features:**
+
+| key | fields | notes |
+|---|---|---|
+| `tls_fingerprint` | `tls.{fingerprint,kind,family,cluster_size,count}` (IPv4) | `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)`. 100 % of edges are `cobalt-strike-default` JARM; ~97 % of emitters read clean in feeds → **catches C2 the feeds miss**. Emitted only when the edge exists (frozen, sparse catalog — absence never rendered). Escalated by rule 100206 (level 12, verdict-independent). |
+
+**Evaluated and dropped (grounded live 2026-07-12 — data would mislead, not help):**
+
+- **CNAME chain depth** — the graph *flattens* chains (apex → all members), so `ALIAS_OF*1..5` reports depth 1 for a true depth-3 chain; the existing 1-hop `dns.cname` already has the member set; depth *anti-correlates* with threat (deepest chains are major-CDN banks).
+- **CT observations** — `CT_OBSERVATION` is a stale ~21 h snapshot (8 k nodes); **0 hits** on every established domain; 0/500 sampled were threats; absence maximally ambiguous.
+- **Origin de-cloaking** (`whisper.origins`) — does not de-cloak; returns a heuristic union of links/mx/spf (the real A-record is absent); 1.3–8.2 s, non-deterministic; **severe false-attribution risk**.
+- **Cohost count** — bounded query works but the signal doesn't separate threat (Tor exit = 1) from benign (Microsoft = 34 933); absence ambiguous (8.8.8.8 = 0 false-zero); redundant with `explain().coverage.sharedHost`.
+
+The strategic finding: **per-alert deep-infra is largely exhausted** — the graph's remaining
+investigative value lives in the heavy on-demand *workflows* (Milestone 2 / #33), not more
+per-alert fields.
+
+---
+
+## 13. On-demand investigations — `whisper-investigate` (Milestone 2 / #33)
+
+The per-alert connector answers "is this IOC bad, briefly?" The heavy Whisper **workflows**
+(the 81-step `indicator` Threat Investigation, `attack-surface`, `typosquat`,
+`subdomain-takeover`, …) answer "tell me everything and why" — too expensive to run per alert,
+so they are exposed as an **analyst-triggered CLI**, `whisper-investigate`, installed alongside
+the connector in `/var/ossec/integrations/`.
+
+```sh
+whisper-investigate theblackservicenetwork.com                 # default: indicator, Markdown
+whisper-investigate 185.220.101.1 --workflow attack-surface    # a different workflow
+whisper-investigate evil.example --format json --out r.json    # machine-readable
+```
+
+**Transport — the load-bearing finding (verified live 2026-07-14).** Workflows are **NOT** on
+the REST `/api/query` surface (`POST /api/workflows/{slug}/run` → 404; that host serves only
+Cypher). They run **only via the MCP server** (`mcp.whisper.security`) over **MCP
+Streamable-HTTP JSON-RPC**. The CLI implements a minimal stdlib MCP client:
+`initialize` → `notifications/initialized` → `tools/call run_workflow`, authed with the same
+`X-API-Key` header as the connector, echoing the `Mcp-Session-Id`, and handling a response that
+is **either** `application/json` **or** `text/event-stream` (SSE). It is **synchronous** — one
+blocking call returns the full report (`indicator` ≈ 13–23 s, ~40–130 KB). Shared HTTP/TLS/auth
+lives in `whisper_client.py` (the WAF-safe User-Agent, CA-bundle resolution, retry taxonomy),
+imported by both the connector and the CLI so it can never drift.
+
+**Report.** Rendered from `results[0].derived` (already normalized by the workflow orchestrator):
+an optional `verdict {score, level, factors[]}`, a `summary[]` of ranked facts (severity
+`error`/`warning`/`info`), `details[]` sections sorted by `(group, order)` whose `views[]` are
+dispatched by `kind` (`stats` / `coverage` / `findings` / `table`; unknown kinds dumped
+defensively so a new kind never crashes the renderer), and an `evidence[]` citation store with
+the exact Cypher. A `--format json` emits `derived` verbatim. **Absence is a gap, not a verdict:**
+the Coverage line surfaces empty/skipped steps — no-data is never rendered as "clean".
+
+**Config / auth.** `--api-key` (flag-first for a CLI) → `$WHISPER_API_KEY` → the key file;
+`--mcp-url` / `$WHISPER_MCP_URL` overrides the server; `--timeout` (default 90 s). Exit codes: 0
+ok · 2 bad args · 3 unrecognizable IOC · 8 auth · 1 other. IOC detection reuses the connector's
+`parse_ip`/`classify_domain` but **not** the `is_global` guard — an analyst may investigate a
+private address on purpose.
+
+## 14. Log source — agent activity → Wazuh (keyed tier, #35)
 
 §1–§11 above describe the **graph-enrichment** connector (`custom-whisper`) — intel pulled
 INTO Wazuh, keyless/graph tier. This section describes the second, independent surface: the
@@ -842,7 +928,7 @@ key (the same key + endpoint enrichment already uses) and **leaves enrichment un
 `whisper-logs.py` reuses the enrichment module's Whisper client, auth, config, dedup DB, and
 socket helpers via `importlib` (one client, one dedup DB), adding no second copy.
 
-### 12.1 The `op:logs` contract (live-verified 2026-07-14)
+### 14.1 The `op:logs` contract (live-verified 2026-07-14)
 
 Source: `POST https://graph.whisper.security/api/query`, body
 `{"query":"CALL whisper.agents({op:'logs', args:{from:<epoch-ms>, limit:<n>}})"}`, tenant key
@@ -871,7 +957,7 @@ Per-kind populated columns (verified against real rows):
 | conn  | `peer(host:port), reason(open\|closed), bytes_up/down, packets_up/down, duration_ms, client_src(reduced subnet), agent` |
 | alloc | `ts, kind, agent` only (address/fqdn via `op:identity`) |
 
-### 12.2 The `from` watermark & incremental cursor
+### 14.2 The `from` watermark & incremental cursor
 
 `from` is the **only** working filter (inclusive lower bound) — the task-assumed `since` arg is
 **silently ignored** and `to` did **not** filter (both verified live). Results are returned
@@ -889,7 +975,7 @@ in a **new `logs_seen` table inside the existing `dedup.db`** (reusing `_dedup_c
 busy-timeout, fail-open) suppresses the re-emit across the boundary and across poller restarts.
 `logs_seen` rows are pruned once they fall a retention window below the cursor.
 
-### 12.3 Ingest path & the two sinks
+### 14.3 Ingest path & the two sinks
 
 - **PRIMARY (`WHISPER_LOGS_SINK=logcollector`, default):** the poller appends one JSON object
   per line — `{"integration":"whisper-logs","whisper_agent":{…}}` — to the NDJSON spool
@@ -903,7 +989,7 @@ busy-timeout, fail-open) suppresses the re-emit across the boundary and across p
   `ignore_output` (the poller writes only to the spool + its own log, never stdout, so the
   scheduler ingests no event of its own). A systemd timer is an equivalent alternative.
 
-### 12.4 Field mapping (columnar record → `data.whisper_agent.*`)
+### 14.4 Field mapping (columnar record → `data.whisper_agent.*`)
 
 Common: `ts→ts_ms` (long epoch-ms) **and** `ts` (ISO-8601 UTC, derived); `kind→kind` (drives
 the rule); `agent→agent_id`, plus `address`(/128) + `fqdn` from cached `op:identity`;
@@ -913,7 +999,7 @@ the rule); `agent→agent_id`, plus `address`(/128) + `fqdn` from cached `op:ide
 alloc: `address/fqdn` from `op:identity`. Nulls are stripped before send (same reason as §2.4 —
 analysisd would index a JSON `null` as the literal string `"null"`).
 
-### 12.5 Rules & the loop guard
+### 14.5 Rules & the loop guard
 
 `whisper_agent_rules.xml`, ids **100210–100249**, group `whisper,whisper_agent_activity,`
 (disjoint from the enrichment `whisper_enrichment` group and its 100200–100209 band). Base
@@ -925,7 +1011,7 @@ set level 0 to suppress the noise); **100213** conn → level 3; **100214** allo
 writes to its own spool/socket (not via integratord), so these alerts can never form a
 feedback loop.
 
-### 12.6 Config keys (key via env/keyfile only, REDACTED)
+### 14.6 Config keys (key via env/keyfile only, REDACTED)
 
 Reuses `WHISPER_API_KEY` (env → `/var/ossec/etc/whisper.key` → argv) and `WHISPER_API_URL`.
 New: `WHISPER_LOGS_SINK` (`logcollector`|`socket`, default `logcollector`), `WHISPER_LOGS_SPOOL`
@@ -941,11 +1027,20 @@ it resolves at runtime only.
 
 ## Change log / provenance
 
-- **v1.6 (2026-07-14):** #35 — added §12 (agent-activity **log source**, keyed tier). Documents
+- **v1.8 (2026-07-28):** #35 — added §14 (agent-activity **log source**, keyed tier). Documents
   the live-verified columnar `op:logs` contract (epoch-ms `ts`, bare `agent` id, no `/128`/fqdn),
   the `from`-only watermark (the assumed `since`/`to` do not filter), the single-shot descending
   poll + `logs_seen` dedup, the two sinks (json localfile default / analysisd socket), the
   `data.whisper_agent.*` mapping, and rules 100210–100214. §1–§11 (enrichment) unchanged.
+- **v1.7 (2026-07-16):** #33 — on-demand `whisper-investigate` CLI (new §13). Shared
+  `whisper_client.py` extracted from the connector (no behavior change). Transport finding:
+  Whisper workflows run only via the MCP server (Streamable-HTTP JSON-RPC), not REST — validated
+  live with a stdlib client.
+- **v1.6 (2026-07-12):** #29/#30/#32 — Tier-1 + Tier-2 enrichment expansion (all grounded live).
+  Added `prefix_threat.*` (§5.1); confirmed-malicious node flags → `known_bad` (§6 gate table);
+  `links.suspicious_count` (§5.2); opt-in `tls_fingerprint` + rule 100206 + the new §12 (with the
+  four dropped Tier-2 candidates). Dropped on ground truth: `asn.threat`, WHOIS dates, DMARC/DKIM,
+  CNAME-chain depth, CT, origins, cohost.
 - **v1.5 (2026-07-11):** #17 — indexer template + stringification findings (verified live).
   §2.4 rewritten: analysisd stringifies every value (incl. `null` → the literal string
   `"null"`), superseding the first-write-wins analysis; the connector now **strips nulls**

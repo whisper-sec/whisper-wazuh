@@ -1,9 +1,11 @@
-"""The sh wrapper must fail loudly — never exec an empty script path."""
+"""The sh wrappers must fail loudly — never exec an empty script path."""
 
 import subprocess
 from pathlib import Path
 
-WRAPPER = Path(__file__).resolve().parent.parent / 'integrations' / 'whisper' / 'custom-whisper'
+_WHISPER = Path(__file__).resolve().parent.parent / 'integrations' / 'whisper'
+WRAPPER = _WHISPER / 'custom-whisper'
+INVESTIGATE_WRAPPER = _WHISPER / 'whisper-investigate'
 
 
 def _run(env=None):
@@ -29,3 +31,18 @@ def test_wazuh_path_override_still_validates_interpreter(tmp_path):
     result = _run(env={'WAZUH_PATH': str(tmp_path)})
     assert result.returncode == 1
     assert 'wazuh python not found' in result.stderr
+
+
+def test_investigate_wrapper_parses():
+    r = subprocess.run(['sh', '-n', str(INVESTIGATE_WRAPPER)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_investigate_wrapper_fails_loudly_without_python():
+    """The whisper-investigate wrapper mirrors the connector's — no /var/ossec python on a
+    dev machine → clear error, never exec the IOC arg as Python."""
+    r = subprocess.run(
+        ['sh', str(INVESTIGATE_WRAPPER), '8.8.8.8'], capture_output=True, text=True, env={}, timeout=10
+    )
+    assert r.returncode == 1
+    assert 'wazuh python not found' in r.stderr

@@ -44,6 +44,9 @@ class TestTemplateFile:
         pt = w['prefix_threat']['properties']
         assert pt['score']['type'] == 'float' and pt['threat_neighbor_count']['type'] == 'long'
         assert pt['is_threat']['type'] == 'boolean'
+        # #32 opt-in TLS fingerprint
+        tls = w['tls']['properties']
+        assert tls['cluster_size']['type'] == 'long' and tls['count']['type'] == 'long'
 
     def test_numerics_and_dates_never_reject_an_alert(self):
         """ignore_malformed on every numeric/date field — a bad value must drop the FIELD,
