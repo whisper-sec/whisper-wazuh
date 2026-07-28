@@ -163,6 +163,14 @@ make dev-acceptance            # run the e2e acceptance suite (TC-01..TC-22) aga
 make dev-whisper-uninstall     # remove it and restore ossec.conf
 ```
 
+The keyed **agent-activity log source** (`--logs`) has its own targets — it needs a real tenant key
+in `/var/ossec/etc/whisper.key` (or `WHISPER_API_KEY` in the manager env) to authenticate `op:logs`:
+
+```bash
+make dev-logs-install          # install the whisper.online agent-activity log source (dev mode, with --logs)
+make dev-logs-smoke            # run the poller once; show the spool + decoded data.whisper_agent.* alerts
+```
+
 ### Whisper API key
 
 The connector resolves its key in this order: **`WHISPER_API_KEY` env → `/var/ossec/etc/whisper.key` → argv**.

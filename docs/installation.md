@@ -141,6 +141,7 @@ themselves carry — the installer rejects that, because it would loop.
 |---|---|
 | `--group <csv>` | rule groups that trigger enrichment (default `sshd`) |
 | `--api-key-file <path>` | install the key from a file into `/var/ossec/etc/whisper.key` (640 root:wazuh); the key never touches a command line |
+| `--logs` | also install the **agent-activity log source** (the keyed tier — see [below](#the-agent-activity-log-source---logs)) |
 | `--skip-template` | don't push the indexer template (you manage it yourself) |
 | `--indexer-url/-user/-pass` | point the template PUT at a remote indexer (default `https://localhost:9200`, `admin`; the password goes via stdin, never on the command line) |
 | `--dev` | dev only — also install a test rule for exercising *domain* enrichment without a real DNS log |
@@ -231,6 +232,77 @@ dir to your `PATH`).
 
 ---
 
+## The agent-activity log source (`--logs`)
+
+Everything above is the **enrichment** half: it pulls threat context *into* Wazuh about the IPs and
+domains your alerts already touch, and it needs no key for the graph lookups. The log source is the
+**other half** — the *keyed* tier. If you're a Whisper customer running agents through the platform,
+it pulls **your own agents' activity** back out of the Whisper control plane and drops it into Wazuh:
+what each agent resolved (DNS allow/refused), what it connected out to, and when it was allocated an
+identity. Two tiers: intel comes *in* (enrichment), your activity comes *out* (log source). See
+[architecture.md](architecture.md#the-agent-activity-log-source-the-keyed-tier) for the shape of it.
+
+It's **opt-in and additive** — enable it with `--logs`, and the enrichment path is left byte-for-byte
+identical:
+
+```bash
+sudo sh install.sh --group sshd --api-key-file /path/to/key.txt --logs
+```
+
+That installs a small poller (`whisper-logs`), its rules (`whisper_agent_rules.xml`), and a **60-second
+`command`-wodle scheduler** plus a JSON spool the logcollector tails — all in a **separate**
+`whisper-logs` block in `ossec.conf`, so it never touches the enrichment `<integration>`. Because it's
+the keyed tier, it uses the **same tenant API key** as enrichment (`WHISPER_API_KEY` env →
+`/var/ossec/etc/whisper.key`); without a real key the poller logs a message and does nothing.
+
+Each poll writes `data.whisper_agent.*` alerts that these rules render:
+
+| rule | fires on | level |
+|---|---|---|
+| `100211` | DNS the agent's policy **refused** (a block) | 6 |
+| `100212` | DNS the agent **allowed** (informational — set level 0 to silence) | 3 |
+| `100213` | egress **connection** (open/closed) | 3 |
+| `100214` | new agent **identity** allocated | 4 |
+| `100215` | **telemetry gap** — a poll hit its row limit and truncated the window | 8 |
+
+The agent-activity rules carry a `whisper_agent_activity` group that's **disjoint** from the enrichment
+groups, so these alerts can never loop back and re-trigger enrichment (`install.sh` also rejects
+`--group whisper_agent_*`).
+
+### Tuning it (`WHISPER_LOGS_*`)
+
+The poller is configured by environment variables on the manager (all optional). Since it runs from the
+wodle, set them where the manager reads its environment, then `wazuh-control restart`:
+
+| variable | default | meaning |
+|---|---|---|
+| `WHISPER_LOGS_SINK` | `logcollector` | `logcollector` (append to the JSON spool, tailed) or `socket` (inject on the analysisd queue directly) |
+| `WHISPER_LOGS_LIMIT` | `1000` (cap `10000`) | rows pulled per poll; hitting it raises the gap alert (rule 100215) — raise this or shorten the interval |
+| `WHISPER_LOGS_KINDS` | `all` | restrict to a CSV subset of `dns,conn,alloc` |
+| `WHISPER_LOGS_AGENT` | *(none)* | restrict to a single agent id |
+| `WHISPER_LOGS_SPOOL` | `/var/ossec/logs/whisper-agent-activity.json` | the NDJSON spool path |
+| `WHISPER_LOGS_CURSOR` | `/var/ossec/var/whisper/logs-cursor` | the incremental watermark (delete it to re-baseline to newest) |
+
+### Verify it
+
+```bash
+sudo grep whisper-logs: /var/ossec/logs/whisper-logs.log     # expect  poll complete: emitted=N sink=logcollector
+```
+
+Then search `data.whisper_agent.kind:*` in **Discover → `wazuh-alerts-*`** for the decoded agent-activity
+alerts. Common lines in `whisper-logs.log`:
+
+| line | means |
+|---|---|
+| `poll complete: emitted=N` | ✅ N agent-activity events ingested |
+| `no API key resolved …` | the keyed tier needs the tenant key — set `WHISPER_API_KEY` / the key file |
+| `auth error (terminal)` | the key is wrong/expired for `op:logs` |
+| `poll hit the limit of N rows …` | truncated window — a gap alert (100215) was raised; raise `WHISPER_LOGS_LIMIT` |
+
+To exercise it on the dev stack: `make dev-logs-install` then `make dev-logs-smoke`.
+
+---
+
 ## Removing it
 
 ```bash
@@ -239,4 +311,5 @@ sudo whisper-wazuh-uninstall --purge  # from the package install
 ```
 
 Removes the `<integration>` block (restoring `ossec.conf` in place), the files, and the rules, and
-restarts the manager. `--purge` also deletes the key file and the dedup cache.
+restarts the manager — and the `whisper-logs` block too if you installed `--logs` (symmetric, a no-op
+if it isn't there). `--purge` also deletes the key file and the dedup cache.
