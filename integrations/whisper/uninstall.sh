@@ -19,6 +19,9 @@ WAZUH_PATH="${WAZUH_PATH:-/var/ossec}"
 OSSEC_CONF="$WAZUH_PATH/etc/ossec.conf"
 MARKER_BEGIN="whisper-integration:begin"
 MARKER_END="whisper-integration:end"
+LOGS_MARKER_BEGIN="whisper-logs:begin"
+LOGS_MARKER_END="whisper-logs:end"
+LOGS_SPOOL="$WAZUH_PATH/logs/whisper-agent-activity.json"
 
 PURGE=0
 SKIP_TEMPLATE=0
@@ -60,6 +63,15 @@ if grep -q "$MARKER_BEGIN" "$OSSEC_CONF"; then
 else
     log "no whisper block in ossec.conf — nothing to remove there"
 fi
+# Remove the log-source managed block too (symmetric with install.sh --logs; a no-op if absent).
+if grep -q "$LOGS_MARKER_BEGIN" "$OSSEC_CONF"; then
+    log "removing the whisper-logs block from ossec.conf"
+    TMP_CONF="$WAZUH_PATH/tmp/ossec.conf.whisperlogs.$$"
+    sed "/$LOGS_MARKER_BEGIN/,/$LOGS_MARKER_END/d" "$OSSEC_CONF" > "$TMP_CONF" || fail "failed to render ossec.conf"
+    grep -q "$LOGS_MARKER_BEGIN" "$TMP_CONF" && fail "log-source marker block survived removal — aborting"
+    cat "$TMP_CONF" > "$OSSEC_CONF"   # in place: keep the inode
+    rm -f "$TMP_CONF"
+fi
 # Re-assert ownership either way (a root:root ossec.conf breaks the manager).
 chown root:wazuh "$OSSEC_CONF"
 chmod 660 "$OSSEC_CONF"
@@ -70,11 +82,14 @@ rm -f "$WAZUH_PATH/integrations/custom-whisper" "$WAZUH_PATH/integrations/custom
     "$WAZUH_PATH/integrations/whisper_client.py" \
     "$WAZUH_PATH/integrations/whisper-investigate" "$WAZUH_PATH/integrations/whisper-investigate.py"
 rm -f "$WAZUH_PATH/etc/rules/whisper_rules.xml" "$WAZUH_PATH/etc/rules/whisper_test_rules.xml"
+rm -f "$WAZUH_PATH/integrations/whisper-logs" "$WAZUH_PATH/integrations/whisper-logs.py"
+rm -f "$WAZUH_PATH/etc/rules/whisper_agent_rules.xml"
 
 if [ "$PURGE" = "1" ]; then
-    log "purging key file + dedup cache"
+    log "purging key file + dedup cache + log-source spool/cursor"
     rm -f "$WAZUH_PATH/etc/whisper.key"
     rm -f "$WAZUH_PATH/var/whisper/dedup.db"*
+    rm -f "$LOGS_SPOOL" "$WAZUH_PATH/var/whisper/logs-cursor"
     rmdir "$WAZUH_PATH/var/whisper" 2>/dev/null || true
 fi
 

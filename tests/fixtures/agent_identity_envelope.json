@@ -1,0 +1,19 @@
+{
+  "columns": ["op", "ok", "status", "result", "error", "retry_after"],
+  "rows": [
+    {
+      "op": "identity",
+      "ok": true,
+      "status": 200,
+      "result": {
+        "columns": ["address", "fqdn", "ptr", "state"],
+        "rows": [
+          ["2a04:2a01:f3c6:4261:9887:4349:306a:52c8", "a98874349306a52c8.botboss.app.", "8.c.2.5.a.6.0.3.9.4.3.4.7.8.8.9.1.6.2.4.6.c.3.f.1.0.a.2.4.0.a.2.ip6.arpa.", "active"]
+        ]
+      },
+      "error": null,
+      "retry_after": null
+    }
+  ],
+  "statistics": {"rowCount": 1, "executionTimeMs": 12}
+}

@@ -13,7 +13,8 @@ COMPOSE_AGENT := $(COMPOSE) -f $(STACK_DIR)/docker-compose.agent.yml
 
 .PHONY: help dev-init dev-certs dev-up dev-up-basic dev-down dev-reset dev-restart dev-ps dev-logs \
         dev-agent-up dev-agent-down dev-agent-logs dev-agent-demo \
-        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-demo-enrich dev-acceptance
+        dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-demo-enrich dev-acceptance \
+        dev-logs-install dev-logs-smoke
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -113,3 +114,24 @@ dev-demo-enrich: ## Inject one IOC (IOC=<value>, default a graph-listed Tor IP) 
 
 dev-acceptance: ## Run the e2e acceptance suite (TC-01..TC-22) against the live stack (needs a real key)
 	python3 tests/e2e/run_acceptance.py $(TC)
+
+# --- Whisper agent-activity log source (keyed tier) --------------------------------------
+dev-logs-install: ## Install the whisper.online agent-activity log source into the dev manager
+	$(COMPOSE_BASE) exec -T wazuh.manager mkdir -p $(WHISPER_SRC)
+	docker cp integrations/whisper/. $$($(COMPOSE_BASE) ps -q wazuh.manager):$(WHISPER_SRC)/
+	$(COMPOSE_BASE) exec -T wazuh.manager sh $(WHISPER_SRC)/install.sh --dev --group sshd --refresh-index --logs
+	@echo "Installed the log source. Put the tenant API key in /var/ossec/etc/whisper.key (or set"
+	@echo "WHISPER_API_KEY in the manager env) — op:logs is the KEYED tier and needs it to authenticate."
+
+dev-logs-smoke: ## Run the log-source poller once and show the spool + decoded alert evidence
+	@echo "--- running the whisper-logs poller once ---"
+	@$(COMPOSE_BASE) exec -T wazuh.manager /var/ossec/integrations/whisper-logs || true
+	@sleep 6
+	@echo "--- spool tail (/var/ossec/logs/whisper-agent-activity.json) ---"
+	@$(COMPOSE_BASE) exec -T wazuh.manager sh -c "tail -3 /var/ossec/logs/whisper-agent-activity.json 2>/dev/null" \
+		|| echo "no spool yet — is the key set + activity present for this tenant?"
+	@echo "--- poller log tail (/var/ossec/logs/whisper-logs.log) ---"
+	@$(COMPOSE_BASE) exec -T wazuh.manager sh -c "tail -4 /var/ossec/logs/whisper-logs.log 2>/dev/null" || true
+	@echo "--- decoded alerts (data.whisper_agent.*) ---"
+	@$(COMPOSE_BASE) exec -T wazuh.manager sh -c "grep -o 'whisper_agent[^,]*' /var/ossec/logs/alerts/alerts.json 2>/dev/null | tail -6" \
+		|| echo "no whisper_agent alerts yet — allow ~1 min for logcollector to tail the spool."
