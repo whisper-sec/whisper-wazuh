@@ -963,9 +963,12 @@ Per-kind populated columns (verified against real rows):
 **silently ignored** and `to` did **not** filter (both verified live). Results are returned
 **newest-first (descending)**, so classic forward multi-page draining is impossible with a
 lower-bound-only API; the poller therefore does **one request per poll** (`from:<cursor>,
-limit:N`), emits every returned row, and advances the cursor to `max(ts)+1`. If a poll returns
-exactly `limit` rows the window may have been truncated (older rows missed) — the poller logs a
-loud gap warning recommending a larger `WHISPER_LOGS_LIMIT` (cap 10000) or a shorter interval.
+limit:N`), emits every returned row, and advances the cursor to `max(ts)+1`. If a poll returns at
+least `limit` rows the window was truncated — with a lower-bound-only, newest-first API the older
+rows below the oldest returned `ts` cannot be paged back, so rather than drop them silently the
+poller **emits a telemetry-gap alert** (`kind=gap` → rule 100215, §14.5) recommending a larger
+`WHISPER_LOGS_LIMIT` (cap 10000) or a shorter interval. The gap is thus visible in the SIEM, not
+just in `whisper-logs.log`.
 The cursor is persisted at `/var/ossec/var/whisper/logs-cursor` (`{"from":<epoch-ms>}`,
 written atomically) — the native-equivalent checkpoint, like the azure/aws wodles' state files.
 
@@ -992,8 +995,8 @@ busy-timeout, fail-open) suppresses the re-emit across the boundary and across p
 ### 14.4 Field mapping (columnar record → `data.whisper_agent.*`)
 
 Common: `ts→ts_ms` (long epoch-ms) **and** `ts` (ISO-8601 UTC, derived); `kind→kind` (drives
-the rule); `agent→agent_id`, plus `address`(/128) + `fqdn` from cached `op:identity`;
-`decision→decision`. dns: `qname/qtype/rcode/source/answer/latency_ms→dns.*`. conn:
+the rule); `agent→agent_id`, plus `address`(/128) + `fqdn` from cached `op:identity`. dns:
+`decision→decision` (dns-only), `qname/qtype/rcode/source/answer/latency_ms→dns.*`. conn:
 `peer→conn.dst` (+ split `conn.dst_host`/`conn.dst_port`), `reason→conn.state`,
 `bytes_up/bytes_down/packets_up/packets_down/duration_ms→conn.*`, `client_src→conn.client_src`.
 alloc: `address/fqdn` from `op:identity`. Nulls are stripped before send (same reason as §2.4 —
@@ -1006,8 +1009,9 @@ analysisd would index a JSON `null` as the literal string `"null"`).
 **100210** (level 0): `decoded_as json` + `integration ^whisper-logs$`. Children key on
 `whisper_agent.kind`/`decision` (no `data.` prefix, pcre2-anchored): **100211** dns
 `decision=refused` → level 6 (policy block); **100212** dns `decision=allow` → level 3 (info;
-set level 0 to suppress the noise); **100213** conn → level 3; **100214** alloc → level 4. The
-`whisper_agent_activity` token is in **no** `<integration>` trigger filter, and the poller
+set level 0 to suppress the noise); **100213** conn → level 3; **100214** alloc → level 4;
+**100215** `kind=gap` → level 8 (a poll hit the row limit and truncated its window — see §14.2).
+The `whisper_agent_activity` token is in **no** `<integration>` trigger filter, and the poller
 writes to its own spool/socket (not via integratord), so these alerts can never form a
 feedback loop.
 
@@ -1031,7 +1035,8 @@ it resolves at runtime only.
   the live-verified columnar `op:logs` contract (epoch-ms `ts`, bare `agent` id, no `/128`/fqdn),
   the `from`-only watermark (the assumed `since`/`to` do not filter), the single-shot descending
   poll + `logs_seen` dedup, the two sinks (json localfile default / analysisd socket), the
-  `data.whisper_agent.*` mapping, and rules 100210–100214. §1–§11 (enrichment) unchanged.
+  `data.whisper_agent.*` mapping, and rules 100210–100215 (incl. the gap alert). §1–§11
+  (enrichment) unchanged.
 - **v1.7 (2026-07-16):** #33 — on-demand `whisper-investigate` CLI (new §13). Shared
   `whisper_client.py` extracted from the connector (no behavior change). Transport finding:
   Whisper workflows run only via the MCP server (Streamable-HTTP JSON-RPC), not REST — validated

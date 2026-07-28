@@ -15,7 +15,7 @@ def _rules(filename):
 class TestAgentRules:
     def test_well_formed_and_id_range(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        assert set(rules) == {'100210', '100211', '100212', '100213', '100214'}
+        assert set(rules) == {'100210', '100211', '100212', '100213', '100214', '100215'}
         for rid in rules:
             assert 100210 <= int(rid) <= 100249
 
@@ -30,12 +30,18 @@ class TestAgentRules:
 
     def test_kind_decision_level_map(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        # dns refused → 6, dns allow → 3, conn → 3, alloc → 4
-        expected = {'100211': '6', '100212': '3', '100213': '3', '100214': '4'}
+        # dns refused → 6, dns allow → 3, conn → 3, alloc → 4, gap → 8
+        expected = {'100211': '6', '100212': '3', '100213': '3', '100214': '4', '100215': '8'}
         for rid, level in expected.items():
             r = rules[rid]
             assert r.get('level') == level
             assert r.find('if_sid').text == '100210'
+
+    def test_gap_rule_keys_on_kind(self):
+        _, rules = _rules('whisper_agent_rules.xml')
+        gap = {f.get('name'): f.text for f in rules['100215'].findall('field')}
+        assert gap['whisper_agent.kind'] == '^gap$'
+        assert 'whisper_agent_gap' in rules['100215'].find('group').text
 
     def test_refused_requires_kind_and_decision(self):
         _, rules = _rules('whisper_agent_rules.xml')
@@ -79,8 +85,13 @@ class TestLoopGuardSeparation:
         enrich_root = ET.parse(WHISPER / 'whisper_rules.xml').getroot()
         assert 'whisper_agent_activity' not in enrich_root.get('name')
 
-    def test_group_not_in_any_integration_trigger_filter(self):
-        """install.sh must never watch whisper_agent_activity in an <integration> filter."""
+    def test_agent_group_only_in_loop_guard(self):
+        """whisper_agent_activity may appear in install.sh ONLY in the loop-guard forbid list
+        (EMITTED_GROUPS), never in an <integration> trigger filter — an enrichment trigger on it
+        would cross-fire the keyed log-source alerts back into enrichment."""
         install = (WHISPER / 'install.sh').read_text()
-        # the enrichment trigger filter default + emitted-group guard list must not include it
-        assert 'whisper_agent_activity' not in install
+        for line in install.splitlines():
+            if 'whisper_agent_activity' in line:
+                assert 'EMITTED_GROUPS' in line, f'agent group appears outside the loop guard: {line}'
+        # and it IS in the guard, so `--group whisper_agent_*` is rejected at install time
+        assert 'whisper_agent_activity' in install

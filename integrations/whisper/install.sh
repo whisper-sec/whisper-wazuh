@@ -77,6 +77,10 @@ cleanup() {
         chown root:wazuh "$OSSEC_CONF" 2>/dev/null
         chmod 660 "$OSSEC_CONF" 2>/dev/null
     fi
+    # Never leave render temp files behind under $WAZUH_PATH/tmp on a failure path.
+    [ -n "${TMP_CONF:-}" ] && rm -f "$TMP_CONF" 2>/dev/null
+    [ -n "${TMP_CONF2:-}" ] && rm -f "$TMP_CONF2" 2>/dev/null
+    return 0
 }
 trap cleanup EXIT INT TERM
 
@@ -117,6 +121,9 @@ mkdir -p "$WAZUH_PATH/tmp" || fail "cannot create $WAZUH_PATH/tmp"
 # Loop guard: the trigger filter must never watch a group the enrichment alerts carry
 # (mapping section 8; the emitted rules sit in whisper,whisper_enrichment,whisper_<verdict>).
 EMITTED_GROUPS="whisper whisper_enrichment whisper_known_bad whisper_suspicious whisper_known_good whisper_unknown whisper_c2"
+# With --logs, the agent-activity rules emit these groups too — an enrichment trigger on any of
+# them would cross-fire the keyed log-source alerts back into enrichment, so forbid them as well.
+[ "$LOGS_MODE" = "1" ] && EMITTED_GROUPS="$EMITTED_GROUPS whisper_agent_activity whisper_agent_dns whisper_agent_refused whisper_agent_conn whisper_agent_alloc whisper_agent_gap"
 for token in $(printf '%s' "$GROUPS_CSV" | tr ',' ' '); do
     for emitted in $EMITTED_GROUPS; do
         [ "$token" = "$emitted" ] && fail "--group '$token' would create a feedback loop (enrichment alerts carry that group)"
@@ -282,8 +289,10 @@ ROLLBACK_CONF="$BACKUP"
 cat "$TMP_CONF" > "$OSSEC_CONF" || fail "failed writing ossec.conf"
 chown root:wazuh "$OSSEC_CONF"
 chmod 660 "$OSSEC_CONF"
-ROLLBACK_CONF=""   # write succeeded — disarm rollback
 rm -f "$TMP_CONF"
+# NOTE: rollback stays ARMED across the restart + verify below. If the manager rejects the new
+# config at startup (e.g. a bad wodle/localfile), the verify times out and the trap restores the
+# backup — disarming here would strand a manager-breaking ossec.conf. Disarmed only on success.
 log "ossec.conf patched (trigger groups: $FILTER_GROUPS)"
 
 # ---- 5. restart + verify (only lines written by THIS restart) -------------------------
@@ -291,6 +300,11 @@ LOG="$WAZUH_PATH/logs/ossec.log"
 LOG_LINES_BEFORE="$(wc -l < "$LOG" 2>/dev/null || echo 0)"
 log "restarting the manager (~15s)"
 "$WAZUH_PATH/bin/wazuh-control" restart >/dev/null 2>&1 || fail "wazuh-control restart failed — check $LOG (backup: $BACKUP)"
+# A clean restart means the new ossec.conf loaded — disarm rollback HERE. A FAILED restart above
+# (manager won't start on a broken config) is the dangerous case and already rolled back. The
+# verify step below is advisory (integratord slow to log / group filter matched nothing) and must
+# NOT revert a valid, already-running config.
+ROLLBACK_CONF=""
 
 log "verifying integratord enabled the integration"
 tries=0
@@ -300,8 +314,16 @@ while [ $tries -lt 15 ]; do
         log "install complete. Trigger groups: $FILTER_GROUPS"
         if [ "$LOGS_MODE" = "1" ]; then
             log "log source installed: whisper-logs poller (60s wodle) -> $LOGS_SPOOL -> logcollector"
-            log "  rules: whisper_agent_rules.xml (100210-100214). Ensure the tenant API key is set"
+            log "  rules: whisper_agent_rules.xml (100210-100215). Ensure the tenant API key is set"
             log "  (WHISPER_API_KEY env for the manager, or $KEY_FILE) so op:logs can authenticate."
+            # Best-effort: confirm modulesd/logcollector actually picked up the new block (the
+            # manager can start while silently dropping a malformed wodle/localfile).
+            if tail -n "+$((LOG_LINES_BEFORE + 1))" "$LOG" 2>/dev/null | grep -qi "whisper-logs"; then
+                log "  OK — the whisper-logs block was loaded (found in $LOG)"
+            else
+                log "  NOTE: could not confirm the whisper-logs wodle/localfile loaded in $LOG —"
+                log "  verify the poller runs (check $WAZUH_PATH/logs/whisper-logs.log after ~60s)"
+            fi
         fi
         if grep -q "$PLACEHOLDER" "$KEY_FILE" 2>/dev/null; then
             log "NOTE: $KEY_FILE still holds the placeholder — enrichment will fail auth until you put a real key in it (640 root:wazuh)"

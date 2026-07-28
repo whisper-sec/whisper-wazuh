@@ -32,6 +32,7 @@ diagnostics go to `{WAZUH}/logs/whisper-logs.log`.
 
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -50,11 +51,16 @@ _ENRICHMENT_MODULE = 'whisper_integration'
 def _load_enrichment():
     if _ENRICHMENT_MODULE in sys.modules:
         return sys.modules[_ENRICHMENT_MODULE]
-    spec = importlib.util.spec_from_file_location(_ENRICHMENT_MODULE, _ENRICHMENT_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[_ENRICHMENT_MODULE] = module
-    spec.loader.exec_module(module)
-    return module
+    try:
+        spec = importlib.util.spec_from_file_location(_ENRICHMENT_MODULE, _ENRICHMENT_PATH)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[_ENRICHMENT_MODULE] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception as exc:  # noqa: BLE001 — a missing/broken sibling is fatal at import (before
+        # log() exists); fail loudly on stderr with a clean exit code, never a bare traceback.
+        sys.stderr.write(f'whisper-logs: cannot load enrichment module {_ENRICHMENT_PATH}: {exc}\n')
+        raise SystemExit(2) from exc
 
 
 w = _load_enrichment()
@@ -79,6 +85,23 @@ LOGS_SEEN_RETAIN_MS = 10 * 60 * 1000
 # Bare agent id (a<hex>) or the op:list-prefixed form (agent-a<hex>). Validated before it is
 # ever inlined into Cypher (from/limit are ints, injection-safe by construction).
 _AGENT_RE = re.compile(r'^(agent-)?a?[0-9a-f]+$')
+
+# A control-plane arg string safe to inline verbatim (no quote/brace/backslash/space). `agent` is
+# the only string arg and already passes _AGENT_RE; this is belt-and-suspenders so the CALL can
+# never be injected even if _AGENT_RE is later loosened or a new string arg is added.
+_SAFE_ARG = re.compile(r'^[A-Za-z0-9._-]+$')
+
+
+def _numeric_ts(value: 'object') -> 'int | None':
+    """A usable epoch-ms timestamp: a finite int/float, else None. bool is excluded (it is an int
+    subclass — True would read as ts=1), and NaN/Infinity are rejected (json.loads accepts those
+    tokens by default). Without this guard int()/max() over a poisoned ts raises and — because it
+    runs before the cursor is saved — wedges the poller into re-fetching the same bad batch."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return int(value)
 
 
 # --- logging (file only; NEVER stdout — the command wodle would ingest it) -----------------
@@ -137,10 +160,15 @@ def load_cursor(path: str) -> 'int | None':
     try:
         with open(path) as f:
             data = json.load(f)
-        value = data.get('from')
-        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-    except (OSError, ValueError, AttributeError):
+    except FileNotFoundError:
+        return None  # genuine first run — expected, no warning
+    except (OSError, ValueError) as exc:
+        # The file EXISTS but is unreadable/corrupt — distinct from a first run. Re-baselining to
+        # "newest limit" silently skips history, so make the reset LOUD rather than indistinguishable.
+        log(f'cursor {path} unreadable ({exc}) — re-baselining to newest; intervening rows skipped')
         return None
+    value = data.get('from') if isinstance(data, dict) else None
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def save_cursor(path: str, value: int) -> None:
@@ -167,6 +195,8 @@ def _args_literal(args: dict) -> str:
         if isinstance(value, int):
             parts.append(f'{key}:{value}')
         elif isinstance(value, str):
+            if not _SAFE_ARG.match(value):
+                raise w.WhisperQueryError(f'refusing to inline unsafe CALL arg {key}={value!r}')
             parts.append(f"{key}:'{value}'")
     return '{' + ', '.join(parts) + '}'
 
@@ -208,8 +238,18 @@ def call_op(cfg: dict, op: str, args: dict) -> 'list[dict]':
     cypher = f"CALL whisper.agents({{op:'{op}', args:{_args_literal(args)}}})"
     outer = w.execute_query(cfg['api_url'], cfg['api_key'], cypher, None, cfg['timeout'], cfg['retries'])
     columns, rows = _unwrap(outer, op)
-    # strict=False: be liberal in what we accept — a short/long row degrades, never crashes.
-    return [dict(zip(columns, row, strict=False)) for row in rows]
+    if not all(isinstance(c, str) for c in columns):
+        raise w.WhisperQueryError(f'non-string column name in result for op:{op}')
+    # Be liberal in what we accept: a short/long row degrades (strict=False), and a non-iterable
+    # cell-row (null/scalar from a malformed envelope) is skipped rather than raising a TypeError
+    # that would crash the whole poll and wedge the cursor.
+    records = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            log(f'skipping malformed row (not a list) for op:{op}: {row!r}')
+            continue
+        records.append(dict(zip(columns, row, strict=False)))
+    return records
 
 
 def fetch_logs(cfg: dict, cursor: 'int | None') -> 'list[dict]':
@@ -224,7 +264,10 @@ def fetch_logs(cfg: dict, cursor: 'int | None') -> 'list[dict]':
 
 def resolve_identity(cfg: dict, agent_id: str, cache: dict) -> dict:
     """{address, fqdn} for an agent id via op:identity (cached per run). Best-effort: identity
-    failures degrade to an id-only alert, they never abort the poll."""
+    failures degrade to an id-only alert, they never abort the poll. A non-string / empty agent id
+    (from a malformed row) resolves to {} rather than crashing the hashable/regex lookup."""
+    if not isinstance(agent_id, str) or not agent_id:
+        return {}
     if agent_id in cache:
         return cache[agent_id]
     ident: dict = {}
@@ -286,14 +329,14 @@ def dedup_key(rec: dict) -> str:
 def project(rec: dict, identity: dict) -> 'dict | None':
     """One columnar record → the `whisper_agent` alert body (nulls stripped before send).
     Returns None for a record with no usable ts/kind."""
-    ts = rec.get('ts')
+    ts_ms = _numeric_ts(rec.get('ts'))
     kind = rec.get('kind')
-    if not isinstance(ts, (int, float)) or kind not in ALL_KINDS:
+    if ts_ms is None or kind not in ALL_KINDS:
         return None
 
     body: dict = {
-        'ts_ms': int(ts),
-        'ts': _iso(ts),
+        'ts_ms': ts_ms,
+        'ts': _iso(ts_ms),
         'kind': kind,
         'agent_id': rec.get('agent'),
         'address': identity.get('address'),
@@ -365,8 +408,9 @@ def filter_new(records: 'list[dict]') -> 'tuple[list[dict], object]':
 
 
 def record_seen(conn, rec: dict) -> None:
-    """Mark one record emitted (best-effort)."""
-    if conn is None:
+    """Mark one record emitted (best-effort). rec is None for synthetic events (the gap alert),
+    which carry no dedup identity — nothing to record."""
+    if conn is None or rec is None:
         return
     try:
         with conn:
@@ -411,9 +455,41 @@ def advance_cursor(records: 'list[dict]') -> 'int | None':
     (`to`/`since` do not filter — verified live), so classic forward multi-page draining is
     impossible; one request per poll returns every row >= cursor up to the limit. If a poll
     returns exactly `limit` rows, older rows in the same window may have been truncated — the
-    caller logs a loud gap warning (raise WHISPER_LOGS_LIMIT / shorten the interval)."""
-    ts_values = [int(r['ts']) for r in records if isinstance(r.get('ts'), (int, float))]
+    caller emits a telemetry-gap alert (raise WHISPER_LOGS_LIMIT / shorten the interval)."""
+    ts_values = [t for t in (_numeric_ts(r.get('ts')) for r in records) if t is not None]
     return max(ts_values) + 1 if ts_values else None
+
+
+# --- emit --------------------------------------------------------------------------------
+def _gap_event(cfg: dict, cursor: 'int | None', next_cursor: 'int | None') -> dict:
+    """A self-describing telemetry-gap alert (rule 100215). Emitted when a poll hits the row limit:
+    the API is newest-first with a lower-bound-only `from`, so rows below the oldest returned ts
+    cannot be paged back — this makes that truncation VISIBLE in the SIEM instead of a silent gap."""
+    body = {
+        'kind': 'gap',
+        'limit': cfg['limit'],
+        'from_ms': cursor,
+        'through_ms': (next_cursor - 1) if next_cursor is not None else None,
+        'note': (
+            'poll hit the row limit; older rows in this window may be missed — '
+            'raise WHISPER_LOGS_LIMIT or shorten the poll interval'
+        ),
+    }
+    return w.strip_nulls({'integration': INTEGRATION_NAME, 'whisper_agent': body})
+
+
+def _emit(cfg: dict, conn, payloads: 'list[dict]', recs: 'list') -> None:
+    """Write payloads to the configured sink and mark each backing record seen. record_seen runs
+    per-event so a mid-batch socket failure re-delivers only the un-recorded suffix, not the whole
+    batch. recs entries may be None (the synthetic gap alert) — sent, but not deduped."""
+    if cfg['sink'] == 'socket':
+        for payload, rec in zip(payloads, recs, strict=True):  # built together — always equal length
+            w.send_event(payload, None)  # Form A: 1:custom-whisper:<json> (location cosmetic)
+            record_seen(conn, rec)
+    else:
+        write_spool(cfg['spool'], payloads)
+        for rec in recs:
+            record_seen(conn, rec)
 
 
 # --- entry point --------------------------------------------------------------------------
@@ -423,11 +499,7 @@ def poll(cfg: dict) -> int:
     records = fetch_logs(cfg, cursor)
     if not records:
         return 0
-    if len(records) >= cfg['limit']:
-        log(
-            f'poll hit the limit of {cfg["limit"]} rows — older rows in this window may be '
-            f'missed; raise WHISPER_LOGS_LIMIT (cap {MAX_LIMIT}) or shorten the poll interval'
-        )
+    limit_hit = len(records) >= cfg['limit']
 
     # Advance the cursor over the FULL batch (even rows we filter/dedup) so the watermark always
     # moves past everything the API returned this poll.
@@ -442,23 +514,36 @@ def poll(cfg: dict) -> int:
         payloads = []
         emit_recs = []
         for rec in fresh:
-            agent_id = rec.get('agent')
-            identity = resolve_identity(cfg, agent_id, identity_cache) if agent_id else {}
-            payload = project(rec, identity)
+            try:
+                identity = resolve_identity(cfg, rec.get('agent'), identity_cache)
+                payload = project(rec, identity)
+            except w.WhisperAuthError:
+                raise  # terminal — the key is dead for everything; stop the whole poll
+            except Exception as exc:  # noqa: BLE001 — one unprojectable row must not sink the batch
+                log(f'skipping unprojectable row: {exc}')
+                continue
             if payload is None:
                 continue
             payloads.append(payload)
             emit_recs.append(rec)
 
         if payloads:
-            if cfg['sink'] == 'socket':
-                for payload in payloads:
-                    w.send_event(payload, None)  # Form A: 1:custom-whisper:<json> (location cosmetic)
-            else:
-                write_spool(cfg['spool'], payloads)
-            for rec in emit_recs:
-                record_seen(conn, rec)
+            _emit(cfg, conn, payloads, emit_recs)
             emitted = len(payloads)
+
+        # A limit hit means the newest-first window was truncated; the older rows below the oldest
+        # returned ts cannot be paged back with a lower-bound-only API, so surface the gap as an
+        # actual alert (rule 100215) rather than dropping that range silently. Only when the cursor
+        # actually advanced — if the whole batch had no usable ts (all-malformed) the cursor can't
+        # move and re-emitting a gap alert every poll would be alert-spam, so log-only there.
+        if limit_hit and next_cursor is not None:
+            _emit(cfg, conn, [_gap_event(cfg, cursor, next_cursor)], [None])
+            log(
+                f'poll hit the limit of {cfg["limit"]} rows — emitted a telemetry-gap alert; '
+                f'raise WHISPER_LOGS_LIMIT (cap {MAX_LIMIT}) or shorten the poll interval'
+            )
+        elif limit_hit:
+            log(f'poll returned {cfg["limit"]}+ rows with no usable ts — cannot advance the cursor')
 
         if next_cursor is not None:
             prune_seen(conn, next_cursor - 1)
@@ -489,6 +574,9 @@ def main(argv: 'list[str]') -> int:
         return 1
     except OSError as exc:
         log(f'spool/io error: {exc}')
+        return 1
+    except Exception as exc:  # noqa: BLE001 — a scheduled wodle must degrade with a log line, never
+        log(f'unexpected error: {type(exc).__name__}: {exc}')  # a bare traceback on stdout/stderr
         return 1
     log(f'poll complete: emitted={emitted} sink={cfg["sink"]}')
     return 0

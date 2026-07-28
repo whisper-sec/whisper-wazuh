@@ -54,13 +54,26 @@
     <group>whisper_agent_conn,</group>
   </rule>
 
-  <!-- New agent identity allocated (a /128 was minted for an agent) -->
+  <!-- New agent identity allocated (a /128 was minted for an agent). The address comes from a
+       separate op:identity lookup and is stripped when that lookup fails, so the description keys
+       on agent_id (always present) rather than the optional address. -->
   <rule id="100214" level="4">
     <if_sid>100210</if_sid>
     <field name="whisper_agent.kind" type="pcre2">^alloc$</field>
-    <description>Whisper agent $(whisper_agent.agent_id): identity allocated ($(whisper_agent.address))</description>
+    <description>Whisper agent $(whisper_agent.agent_id): identity allocated</description>
     <options>no_full_log</options>
     <group>whisper_agent_alloc,</group>
+  </rule>
+
+  <!-- Telemetry GAP: a poll hit the row limit, so older rows in that window may be missed. The
+       poller emits this (kind=gap) instead of dropping the range silently — raise the limit or
+       shorten the interval. -->
+  <rule id="100215" level="8">
+    <if_sid>100210</if_sid>
+    <field name="whisper_agent.kind" type="pcre2">^gap$</field>
+    <description>Whisper agent-activity telemetry GAP: poll truncated at $(whisper_agent.limit) rows — raise WHISPER_LOGS_LIMIT or shorten the interval</description>
+    <options>no_full_log</options>
+    <group>whisper_agent_gap,</group>
   </rule>
 
 </group>
