@@ -22,6 +22,11 @@ And there's a **second tier** for Whisper customers who run agents on the platfo
   outside world *in*, the log source brings your own activity *out*. See
   [its section below](#the-agent-activity-log-source-the-keyed-tier).
 
+**Keyless vs keyed.** The enrichment connector queries the **public** Whisper graph, so it needs
+**no API key** — install it and it works. The CLI and the log source read your tenant's **private**
+data (heavier investigation workflows; your own agents' activity), so those need a Whisper API key —
+get one or compare tiers at [whisper.security/pricing](https://www.whisper.security/pricing).
+
 All of it is plain Python using only the standard library, running on the Python that already ships
 with Wazuh. No extra services, no database of our own, nothing to `pip install` on the manager.
 

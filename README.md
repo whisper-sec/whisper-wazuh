@@ -53,9 +53,12 @@ All three push the indexer template, drop the files, patch `ossec.conf` (with ro
 and verify. Enrichment starts on the next alert in a trigger group that carries a public IP or
 domain.
 
-**Prerequisites:** a Wazuh manager 4.x (root), TLS egress to `graph.whisper.security`, and your
-own Whisper API key (BYOK). Running a **containerized** manager? Skip `--api-key-file` and inject
-`WHISPER_API_KEY` as a container-env secret instead.
+**Prerequisites:** a Wazuh manager 4.x (root) and TLS egress to `graph.whisper.security`. The
+**enrichment** above needs **no API key** — the graph is queried keyless. The `--api-key-file` in
+these examples is only for the *keyed* features (the on-demand CLI and the `--logs` log source),
+which read your tenant's private data; get a key or compare tiers at
+[whisper.security/pricing](https://www.whisper.security/pricing). (Containerized manager? Skip
+`--api-key-file` and inject `WHISPER_API_KEY` as a container-env secret instead.)
 
 **Verify:**
 ```bash

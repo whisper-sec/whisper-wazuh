@@ -19,9 +19,13 @@ The integration runs entirely on the manager — you don't touch your agents.
 | The manager's **bundled Python 3.10** | already there | the connector is stdlib-only — nothing to `pip install` |
 | **TLS egress** to `graph.whisper.security` | from the manager | the enrichment API. For the on-demand CLI, also `mcp.whisper.security` |
 | Your **indexer reachable** from the install host | default `https://localhost:9200`, user `admin` | the installer pushes a field-type template there first |
-| A **Whisper API key** | yours (BYOK) | for live enrichment. Without one the integration installs fine but every lookup auth-fails |
+| *(optional)* A **Whisper API key** | yours (BYOK) | **not needed for enrichment** — the graph is queried keyless. Required only for the *keyed* features: the [agent-activity log source](#the-agent-activity-log-source---logs) and the [on-demand CLI](#the-on-demand-cli). Get a key / compare tiers at [whisper.security/pricing](https://www.whisper.security/pricing) |
 
 Agents are optional — the connector reacts to *alerts*, wherever they come from.
+
+**Two tiers.** The always-on **enrichment** connector queries the public Whisper graph and needs
+**no key**. The **keyed** features — the agent-activity log source and the on-demand CLI — read
+*your* tenant's private data, so they need a Whisper API key ([pricing](https://www.whisper.security/pricing)).
 
 ---
 
@@ -89,8 +93,13 @@ It's idempotent — run it again with different flags and it re-renders the bloc
 
 ## The API key (bring your own)
 
-The key is a per-organization secret — **you supply your own**, it never ships with the
-integration. The connector looks for it in this order, on every lookup:
+**Enrichment doesn't need a key** — you can skip this whole section if that's all you want. The key
+unlocks the **keyed features**: the [agent-activity log source](#the-agent-activity-log-source---logs)
+and the [on-demand CLI](#the-on-demand-cli), which read your tenant's private data. To get a key or
+compare tiers, see [whisper.security/pricing](https://www.whisper.security/pricing).
+
+The key is a per-organization secret — **you supply your own**, it never ships with the integration.
+When present, every tier resolves it in this order:
 
 ```
    WHISPER_API_KEY  (env)   →   /var/ossec/etc/whisper.key   →   argv
@@ -104,7 +113,7 @@ sudo sh install.sh --group sshd --api-key-file /path/to/key.txt   # writes /var/
 ```
 Or set it yourself: `printf '%s' 'YOUR-KEY' | sudo tee /var/ossec/etc/whisper.key >/dev/null &&
 sudo chown root:wazuh /var/ossec/etc/whisper.key && sudo chmod 640 /var/ossec/etc/whisper.key`.
-The file is read on each enrichment, so **rotating the key needs no restart** — just replace the
+The file is read each time it's used, so **rotating the key needs no restart** — just replace the
 file.
 
 **On a containerized manager** — inject `WHISPER_API_KEY` as a container-env secret (Kubernetes
@@ -252,8 +261,10 @@ sudo sh install.sh --group sshd --api-key-file /path/to/key.txt --logs
 That installs a small poller (`whisper-logs`), its rules (`whisper_agent_rules.xml`), and a **60-second
 `command`-wodle scheduler** plus a JSON spool the logcollector tails — all in a **separate**
 `whisper-logs` block in `ossec.conf`, so it never touches the enrichment `<integration>`. Because it's
-the keyed tier, it uses the **same tenant API key** as enrichment (`WHISPER_API_KEY` env →
-`/var/ossec/etc/whisper.key`); without a real key the poller logs a message and does nothing.
+the keyed tier, it **needs your tenant API key** (`WHISPER_API_KEY` env → `/var/ossec/etc/whisper.key`,
+provisioned exactly as [above](#the-api-key-bring-your-own); get one at
+[whisper.security/pricing](https://www.whisper.security/pricing)); without a real key the poller just
+logs a message and does nothing.
 
 Each poll writes `data.whisper_agent.*` alerts that these rules render:
 
