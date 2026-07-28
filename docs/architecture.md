@@ -7,14 +7,22 @@ project bolts threat intelligence onto that: when an alert mentions a public IP 
 ask the **Whisper infrastructure graph** what it knows about that indicator, and write the answer
 back into Wazuh as a new, graded alert.
 
-There are two ways to use it:
+There are two ways to use that enrichment:
 
 - **The connector** — automatic. Runs on the manager for every alert in the groups you pick, and
   enriches the indicators it finds. This is the always-on layer.
 - **The CLI (`whisper-investigate`)** — manual. An analyst runs it on one indicator to get a deep
   investigation report. This is the on-demand deep-dive.
 
-Both are plain Python using only the standard library, running on the Python that already ships
+And there's a **second tier** for Whisper customers who run agents on the platform:
+
+- **The log source (`whisper-logs`)** — automatic and *keyed*. On a schedule, it pulls your own
+  agents' activity (DNS allow/refused, egress connections, identity allocation) back out of the
+  Whisper control plane and into Wazuh as alerts. Where the connector/CLI bring intel about the
+  outside world *in*, the log source brings your own activity *out*. See
+  [its section below](#the-agent-activity-log-source-the-keyed-tier).
+
+All of it is plain Python using only the standard library, running on the Python that already ships
 with Wazuh. No extra services, no database of our own, nothing to `pip install` on the manager.
 
 ---
@@ -128,6 +136,45 @@ live in exactly one place.
 
 ---
 
+## The agent-activity log source (the keyed tier)
+
+The connector and CLI answer *"what's known about this indicator?"* — intel from the outside world.
+The log source answers a different question: *"what did my own agents actually do?"* That data lives
+in the Whisper control plane behind your API key, so this is the **keyed** tier.
+
+It's a scheduled **poller** (`whisper-logs`), not an alert hook. A 60-second `command`-wodle runs it;
+each run pulls the tenant's newest activity rows since a saved cursor, decodes them per kind (DNS,
+egress connection, identity allocation), and emits `data.whisper_agent.*` alerts:
+
+```
+   Whisper control plane                     the manager
+   (op:logs, keyed)                           │
+        │   ┌─ 60s wodle ─► whisper-logs ──► NDJSON spool ──► logcollector tails it
+        └──►│                    │                                    │
+            │                    └─ or ─► analysisd queue (socket) ───┤
+            │                                                         ▼
+            │                                        whisper_agent_rules.xml → alerts
+            │                                        (dns / conn / alloc / gap)
+```
+
+Design choices worth knowing:
+
+- **Additive, never invasive.** It's opt-in (`install.sh --logs`), lives in its own `whisper-logs`
+  block in `ossec.conf`, and its rules sit in a `whisper_agent_activity` group that's *disjoint* from
+  the enrichment groups — so agent-activity alerts can never loop back and re-trigger enrichment. The
+  enrichment connector is unchanged, byte for byte.
+- **One client, one key, one cache.** The poller imports the connector module and reuses its Whisper
+  client, auth, config, dedup DB, and socket — it's literally the same machinery, not a second copy.
+- **Incremental with a cursor.** Because nothing pushes to it, it pulls: a persisted `from` watermark,
+  advanced each poll. The API is newest-first with a lower-bound-only filter, so if a poll hits its row
+  limit the older tail can't be paged back — rather than lose it silently, the poller raises a **telemetry
+  gap alert** (rule 100215) so the truncation is visible in the SIEM.
+
+The field-by-field contract is [mapping §14](whisper-to-wazuh-mapping.md#14-log-source--agent-activity--wazuh-keyed-tier-35);
+the admin how-to is in [installation.md](installation.md#the-agent-activity-log-source---logs).
+
+---
+
 ## The moving parts
 
 | File | What it is |
@@ -135,6 +182,8 @@ live in exactly one place.
 | `custom-whisper` + `custom-whisper.py` | The connector. Wrapper + the actual Python. integratord runs the wrapper; it execs the `.py` on Wazuh's bundled interpreter. |
 | `whisper_client.py` | Shared plumbing — the HTTPS client, TLS/CA handling, the retry/error rules, the IOC parsers, key/URL resolution. Imported by both the connector and the CLI. |
 | `whisper-investigate` + `whisper-investigate.py` | The on-demand analyst CLI (the MCP client + the report renderer). |
+| `whisper-logs` + `whisper-logs.py` | The agent-activity poller (keyed tier). Reuses the connector's client/auth/dedup/socket via import; scheduled by a 60s wodle. Installed only with `--logs`. |
+| `whisper_agent_rules.xml` | Turns the poller's `data.whisper_agent.*` events into alerts (dns refused→6, allow→3, conn→3, alloc→4, gap→8). Group `whisper_agent_activity`, disjoint from enrichment. |
 | `whisper_rules.xml` | Turns a verdict into an alert level (known_bad→12, suspicious→7, …). Without these, the enrichment is just a decoded event with no severity. |
 | `whisper-template.json` | Registers the field *types* on the indexer, so `data.whisper.*` numbers/booleans index correctly (analysisd stringifies everything on the way through). |
 | `dedup.db` (SQLite) | A small cache so the same indicator isn't re-looked-up on every alert within a TTL. |

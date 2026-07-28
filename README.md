@@ -9,7 +9,9 @@ with relationship context from the Whisper infrastructure graph.
 **Released — v1.0.0.** Milestones 1 (MVP), 2 (Enrichment Expansion), and 3 (Release &
 Distribution) are complete: a working per-alert connector plus an on-demand investigation CLI,
 verified end-to-end on **Wazuh 4.14.5**, and shipped as a tarball, `.deb`/`.rpm` packages, and a
-one-line installer (see [Install](#install) and the [changelog](CHANGELOG.md)).
+one-line installer (see [Install](#install) and the [changelog](CHANGELOG.md)). Since then, an
+opt-in **agent-activity log source** (the keyed tier — `install.sh --logs`) brings a tenant's own
+agent DNS/egress/identity activity into Wazuh.
 See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) and
 [issues](https://github.com/whisper-sec/whisper-wazuh/issues) for what's next.
 

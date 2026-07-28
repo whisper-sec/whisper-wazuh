@@ -5,6 +5,19 @@ All notable changes to whisper-wazuh. The format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **Agent-activity log source** (`whisper-logs`, the *keyed* tier) — an opt-in (`install.sh --logs`)
+  scheduled poller that pulls a tenant's own agent activity from the Whisper control plane (`op:logs`)
+  and writes it into Wazuh as `data.whisper_agent.*` alerts: DNS allow/refused, egress connections,
+  and identity allocation. Runs from a 60s `command`-wodle into a JSON spool (or the analysisd socket),
+  keeps an incremental cursor, and raises a **telemetry-gap alert** (rule 100215) when a poll truncates
+  its window rather than dropping rows silently. New rules `whisper_agent_rules.xml` (100210–100215,
+  group `whisper_agent_activity` — disjoint from enrichment, no feedback loop). Reuses the connector's
+  Whisper client / auth / dedup DB / socket via import — one client, one key, one cache; the enrichment
+  path is unchanged. Configurable via `WHISPER_LOGS_*`. Docs: [installation](docs/installation.md#the-agent-activity-log-source---logs),
+  [architecture](docs/architecture.md#the-agent-activity-log-source-the-keyed-tier), and mapping §14.
+
 ## [1.0.0] — 2026-07-27
 
 First release — a Wazuh integration that enriches alerts with context from the Whisper
