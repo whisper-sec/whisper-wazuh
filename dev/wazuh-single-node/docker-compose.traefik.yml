@@ -1,0 +1,22 @@
+# Traefik reverse-proxy overlay for the single-node dev stack.
+# Use together with the base compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
+# Run scripts/dev-init.sh first to create the TLS cert, hosts entries, and CA trust.
+
+services:
+  traefik:
+    image: traefik:v3.3
+    hostname: traefik
+    restart: always
+    depends_on:
+      - wazuh.dashboard
+      - wazuh.manager
+      - wazuh.indexer
+    ports:
+      - "443:443"
+      # Traefik dashboard, localhost-only: http://127.0.0.1:8080/dashboard/
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./config/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./config/traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./config/certs:/certs:ro

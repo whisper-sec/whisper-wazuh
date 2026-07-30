@@ -1,0 +1,23 @@
+# Tooling for the whisper-wazuh connector (CONTRIBUTING: Python + ruff + pytest).
+# The shipped script (integrations/whisper/custom-whisper.py) runs on the manager's
+# bundled Python 3.10 — stdlib only; target-version is pinned accordingly.
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+include = ["integrations/whisper/*.py", "tests/*.py", "tests/e2e/*.py"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
+# UP037: the shipped scripts use quoted `'str | None'` annotations on purpose — keep them as
+#   strings for maximum runtime compatibility on the bundled interpreter.
+# UP038: `isinstance(x, (int, float))` — the tuple form is idiomatic and faster than the
+#   `int | float` union form (ruff later deprecated this rule); these are hot per-value paths.
+ignore = ["UP037", "UP038"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

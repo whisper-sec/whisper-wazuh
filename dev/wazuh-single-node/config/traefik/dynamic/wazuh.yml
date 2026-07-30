@@ -1,0 +1,54 @@
+# Traefik dynamic configuration — whisper-wazuh dev routing.
+# Host-based routers terminate TLS at Traefik and re-encrypt to each Wazuh
+# service (which all speak HTTPS). Backend cert verification is skipped because
+# the upstream certs are issued for internal hostnames, not the proxied dev
+# domains — acceptable for a local dev proxy hop only.
+
+http:
+  routers:
+    dashboard:
+      rule: "Host(`dashboard.whisper-wazuh-dev.localhost`)"
+      entryPoints: [websecure]
+      service: dashboard
+      tls: {}
+    manager:
+      rule: "Host(`manager.whisper-wazuh-dev.localhost`)"
+      entryPoints: [websecure]
+      service: manager
+      tls: {}
+    indexer:
+      rule: "Host(`indexer.whisper-wazuh-dev.localhost`)"
+      entryPoints: [websecure]
+      service: indexer
+      tls: {}
+
+  services:
+    dashboard:
+      loadBalancer:
+        serversTransport: insecure@file
+        servers:
+          - url: "https://wazuh.dashboard:5601"
+    manager:
+      loadBalancer:
+        serversTransport: insecure@file
+        servers:
+          - url: "https://wazuh.manager:55000"
+    indexer:
+      loadBalancer:
+        serversTransport: insecure@file
+        servers:
+          - url: "https://wazuh.indexer:9200"
+
+  serversTransports:
+    insecure:
+      insecureSkipVerify: true
+
+tls:
+  certificates:
+    - certFile: /certs/wildcard.crt
+      keyFile: /certs/wildcard.key
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/wildcard.crt
+        keyFile: /certs/wildcard.key

@@ -1,0 +1,53 @@
+name: CI
+
+# Lint + unit tests on every push/PR to the long-lived branches (#21). The unit tier is the
+# MVP gate — mocked HTTP, no live key, no docker. The e2e job against the single-node stack is
+# a deliberate follow-up (acceptance §5 item 8: no coverage-% gate for MVP).
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+# Cancel superseded runs on the same ref (a new push to a PR obsoletes the previous run).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ruff (lint + format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Pin ruff: an unpinned upgrade could reformat differently and fail format --check on a
+      # PR that never touched the code. Bump deliberately (and re-run `ruff format`) when desired.
+      - run: pip install ruff==0.6.9
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check .
+
+  test:
+    name: pytest (unit tier)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the manager's bundled interpreter (the deployment target); 3.12 is the
+        # CONTRIBUTING dev version. The connector is stdlib-only, so no other deps are needed.
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install pytest
+      - name: pytest
+        run: pytest -q

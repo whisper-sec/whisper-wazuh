@@ -1,0 +1,23 @@
+<!--
+  DEV-ONLY trigger rule for exercising DOMAIN enrichment on the dev stack.
+
+  Raw syslog can't produce a domain field, so domain acceptance tests inject a synthetic
+  JSON event carrying a DNS query name and match it with this rule. The installer's dev mode
+  (install.sh with the dev flag) installs this file AND adds the `whisper_test` group to the
+  <integration> trigger filter; it is NEVER installed in production.
+
+  The rule matches a `whisper_test` SENTINEL field (not dns.rrname directly) so it can only
+  ever fire on our injected test event, never on real DNS logs a stack might ingest.
+
+  Inject the trigger with:
+    1:whisper-test:{"whisper_test":"1","dns":{"rrname":"google.com"}}
+  -> data.dns.rrname is an active domain path (mapping §9), so the connector extracts and
+     enriches google.com.
+-->
+<group name="whisper_test,">
+  <rule id="100290" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="whisper_test" type="pcre2">^1$</field>
+    <description>Whisper dev test event: $(dns.rrname)</description>
+  </rule>
+</group>

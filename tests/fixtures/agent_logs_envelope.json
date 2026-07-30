@@ -1,0 +1,23 @@
+{
+  "columns": ["op", "ok", "status", "result", "error", "retry_after"],
+  "rows": [
+    {
+      "op": "logs",
+      "ok": true,
+      "status": 200,
+      "result": {
+        "columns": ["ts", "kind", "qname", "qtype", "rcode", "decision", "source", "answer", "latency_ms", "agent", "peer", "bytes_up", "bytes_down", "duration_ms", "reason", "client_src", "packets_up", "packets_down"],
+        "rows": [
+          [1784002496119, "conn", null, null, null, null, null, null, null, "a98874349306a52c8", "rdap.whisper.online:443", 1715, 4086, 185, "closed", "145.224.65.0/24", 3, 4],
+          [1784002495934, "conn", null, null, null, null, null, null, null, "a98874349306a52c8", "rdap.whisper.online:443", 0, 0, 0, "open", "145.224.65.0/24", 0, 0],
+          [1784002495932, "dns", "rdap.whisper.online", "AAAA", "NOERROR", "allow", "upstream", "2001:19f0:5000:15f6:5400:6ff:fe45:110", 3, "a98874349306a52c8", null, null, null, null, null, null, null, null],
+          [1784002490001, "dns", "blocked.example.com", "A", "REFUSED", "refused", "policy", null, 1, "a98874349306a52c8", null, null, null, null, null, null, null, null],
+          [1784002483385, "alloc", null, null, null, null, null, null, null, "a98874349306a52c8", null, null, null, null, null, null, null, null]
+        ]
+      },
+      "error": null,
+      "retry_after": null
+    }
+  ],
+  "statistics": {"rowCount": 1, "executionTimeMs": 83}
+}

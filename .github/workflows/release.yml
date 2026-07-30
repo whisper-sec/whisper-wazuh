@@ -1,0 +1,61 @@
+name: Release
+
+# On a version tag (v1.0.0, v1.1.0, …): package the self-contained install bundle
+# (integrations/whisper/ + the docs a deployer needs) and attach it to a GitHub Release.
+# The bundle has no repo/pip dependency — extract it on a manager and run install.sh.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the Release and upload the asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the install bundle (tarball)
+        run: |
+          set -eu
+          name="whisper-wazuh-${{ steps.ver.outputs.version }}"
+          # the bundle IS integrations/whisper/, plus the docs a deployer reads next to it
+          cp -r integrations/whisper "$name"
+          cp CHANGELOG.md README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          # a stable-named copy so `releases/latest/download/whisper-wazuh.tar.gz` resolves
+          cp "$name.tar.gz" whisper-wazuh.tar.gz
+          echo "--- bundle contents ---"; tar tzf "$name.tar.gz"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Build .deb and .rpm (nfpm)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          nfpm="$(go env GOPATH)/bin/nfpm"
+          "$nfpm" package -f packaging/nfpm.yaml -p deb -t .
+          "$nfpm" package -f packaging/nfpm.yaml -p rpm -t .
+          ls -la ./*.deb ./*.rpm
+
+      - name: Checksums
+        run: sha256sum whisper-wazuh-*.tar.gz whisper-wazuh.tar.gz ./*.deb ./*.rpm > SHA256SUMS
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "whisper-wazuh-${{ steps.ver.outputs.version }}.tar.gz" \
+            whisper-wazuh.tar.gz ./*.deb ./*.rpm SHA256SUMS \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

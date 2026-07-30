@@ -1,0 +1,79 @@
+<!--
+  Whisper agent-activity rules — render the whisper-logs log source's data.whisper_agent.*
+  events as analyst-visible alerts (agent DNS allow/refused, egress connection, identity
+  allocation). Mapping spec §14. This is the KEYED tier — separate from the enrichment rules
+  in whisper_rules.xml (whisper_enrichment), which stay untouched.
+
+  Install to /var/ossec/etc/rules/whisper_agent_rules.xml (root:wazuh 660); restart the manager.
+
+  Field names carry NO `data.` prefix in rules XML (the JSON decoder flattens data.whisper_agent.*
+  to whisper_agent.*); query them as data.whisper_agent.* only in OpenSearch/the dashboard.
+  kind/decision matches are pcre2-anchored so a value can never substring-collide.
+
+  Rule ids 100210-100249 (custom range, above the built-in ceiling and disjoint from the
+  enrichment 100200-100209 band). The `whisper_agent_activity` group is a distinct token that
+  appears in NO <integration> trigger filter and is NOT the enrichment group, so these alerts
+  can never re-invoke enrichment (loop guard, mapping §14) — and the poller writes to its own
+  spool/socket, so it is not itself alert-triggered.
+-->
+<group name="whisper,whisper_agent_activity,">
+
+  <!-- Base classifier: level 0 = decode + tag only, no alert of its own -->
+  <rule id="100210" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="integration" type="pcre2">^whisper-logs$</field>
+    <description>Whisper agent-activity event</description>
+  </rule>
+
+  <!-- DNS resolution the agent's policy REFUSED (a policy block — the actionable signal) -->
+  <rule id="100211" level="6">
+    <if_sid>100210</if_sid>
+    <field name="whisper_agent.kind" type="pcre2">^dns$</field>
+    <field name="whisper_agent.decision" type="pcre2">^refused$</field>
+    <description>Whisper agent $(whisper_agent.agent_id): DNS REFUSED for $(whisper_agent.dns.qname)</description>
+    <options>no_full_log</options>
+    <group>whisper_agent_dns,whisper_agent_refused,</group>
+  </rule>
+
+  <!-- DNS resolution the agent's policy ALLOWED (informational; set level 0 to suppress) -->
+  <rule id="100212" level="3">
+    <if_sid>100210</if_sid>
+    <field name="whisper_agent.kind" type="pcre2">^dns$</field>
+    <field name="whisper_agent.decision" type="pcre2">^allow$</field>
+    <description>Whisper agent $(whisper_agent.agent_id): DNS allow for $(whisper_agent.dns.qname)</description>
+    <options>no_full_log</options>
+    <group>whisper_agent_dns,</group>
+  </rule>
+
+  <!-- Egress connection from the agent's routable /128 (open/closed) -->
+  <rule id="100213" level="3">
+    <if_sid>100210</if_sid>
+    <field name="whisper_agent.kind" type="pcre2">^conn$</field>
+    <description>Whisper agent $(whisper_agent.agent_id): egress $(whisper_agent.conn.state) to $(whisper_agent.conn.dst)</description>
+    <options>no_full_log</options>
+    <group>whisper_agent_conn,</group>
+  </rule>
+
+  <!-- New agent identity allocated (a /128 was minted for an agent). The address comes from a
+       separate op:identity lookup and is stripped when that lookup fails, so the description keys
+       on agent_id (always present) rather than the optional address. -->
+  <rule id="100214" level="4">
+    <if_sid>100210</if_sid>
+    <field name="whisper_agent.kind" type="pcre2">^alloc$</field>
+    <description>Whisper agent $(whisper_agent.agent_id): identity allocated</description>
+    <options>no_full_log</options>
+    <group>whisper_agent_alloc,</group>
+  </rule>
+
+  <!-- Telemetry GAP: a poll hit the row limit, so older rows in that window may be missed. The
+       poller emits this (kind=gap) instead of dropping the range silently — raise the limit or
+       shorten the interval. -->
+  <rule id="100215" level="8">
+    <if_sid>100210</if_sid>
+    <field name="whisper_agent.kind" type="pcre2">^gap$</field>
+    <description>Whisper agent-activity telemetry GAP: poll truncated at $(whisper_agent.limit) rows — raise WHISPER_LOGS_LIMIT or shorten the interval</description>
+    <options>no_full_log</options>
+    <group>whisper_agent_gap,</group>
+  </rule>
+
+</group>
