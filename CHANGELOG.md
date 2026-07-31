@@ -5,6 +5,12 @@ All notable changes to whisper-wazuh. The format loosely follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-31
+
+Adds the **keyed tier** — the agent-activity log source — alongside the v1.0.0 enrichment
+connector, and clarifies the keyless/keyed model across the docs. The enrichment path is
+unchanged; the log source is opt-in (`install.sh --logs`).
+
 ### Added
 
 - **Agent-activity log source** (`whisper-logs`, the *keyed* tier) — an opt-in (`install.sh --logs`)
@@ -55,5 +61,6 @@ interpreter); bring your own Whisper API key.
   [acceptance criteria](docs/mvp-acceptance-criteria.md), and a captured
   [scenario](docs/scenarios/01-tor-ip-enrichment.md).
 
-[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.0.0
