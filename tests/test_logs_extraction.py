@@ -48,7 +48,7 @@ class TestProjection:
         assert body['ts_ms'] == 1784002495932 and body['ts'].startswith('2026-07-14T')
         assert body['agent_id'] == 'a98874349306a52c8'
         assert body['dns']['qname'] == 'rdap.whisper.online'
-        assert body['dns']['answer'] == '2001:19f0:5000:15f6:5400:6ff:fe45:110'
+        assert body['dns']['answer'] == '2a04:2a00::80'
         # no /128 or fqdn without identity enrichment; nulls stripped → no conn block
         assert 'address' not in body and 'fqdn' not in body and 'conn' not in body
 
