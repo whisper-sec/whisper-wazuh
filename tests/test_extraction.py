@@ -224,13 +224,13 @@ class TestVocabularyFormats:
     def test_all_lines(self, wi, log_lines):
         wi.log_invoke('1.2.3.4', 'ipv4', 'ipv4|1.2.3.4|001')
         wi.log_skip('dedup', dedup_key='ipv4|1.2.3.4|001')
-        wi.log_api('https://graph.whisper.security', 42)
+        wi.log_api('https://graph.whisper.online', 42)
         wi.log_error(wi.WhisperAuthError('401 from api'))
         wi.log_emit('ipv4|1.2.3.4|001', 2048)
         assert log_lines() == [
             'whisper: invoke ioc=1.2.3.4 type=ipv4 dedup_key=ipv4|1.2.3.4|001',
             'whisper: skip reason=dedup dedup_key=ipv4|1.2.3.4|001',
-            'whisper: api url=https://graph.whisper.security ms=42',
+            'whisper: api url=https://graph.whisper.online ms=42',
             'whisper: error class=auth detail=401 from api',
             'whisper: emit dedup_key=ipv4|1.2.3.4|001 payload_bytes=2048',
         ]

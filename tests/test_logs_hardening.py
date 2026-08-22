@@ -13,7 +13,7 @@ _COLS = ['ts', 'kind', 'decision', 'qname', 'agent']
 
 def _cfg(tmp_path, **over):
     cfg = {
-        'api_url': 'https://graph.whisper.security',
+        'api_url': 'https://graph.whisper.online',
         'api_key': 'k',
         'timeout': 10,
         'retries': 3,

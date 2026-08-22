@@ -64,7 +64,7 @@ with Wazuh. No extra services, no database of our own, nothing to `pip install` 
                                          │ runs it on demand       │    │              │
                                   ┌──────┴──────┐                  ▼    ▼              ▼
                                   │   analyst   │         mcp.whisper.security   ┌───────────┐
-                                  │   (shell)   │         graph.whisper.security │ DASHBOARD │
+                                  │   (shell)   │         graph.whisper.online │ DASHBOARD │
                                   └─────────────┘          (the Whisper graph)   │ (web UI)  │
                                                                                  └───────────┘
 ```
