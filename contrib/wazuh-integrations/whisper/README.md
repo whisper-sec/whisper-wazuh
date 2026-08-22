@@ -43,7 +43,7 @@ interpreter — and the graph enrichment is **keyless** (no API key required).
 * **Wazuh Server (manager) 4.x** — tested on 4.14.5.
 * The manager's **bundled Python 3.10** — the connector is standard-library only; nothing to
   `pip install`.
-* **TLS egress** from the manager to `graph.whisper.security` (the graph API).
+* **TLS egress** from the manager to `graph.whisper.online` (the graph API).
 * The **Wazuh indexer reachable** from the manager, to install the field-type template.
 * **No API key** — the graph enrichment is queried anonymously. (The upstream *keyed* features need a
   Whisper API key; see [Sources](#sources).)
@@ -55,7 +55,7 @@ interpreter — and the graph enrichment is **keyless** (no API key required).
 ### Installing Whisper
 
 Nothing to install — Whisper is a hosted service. The connector queries the graph at
-`https://graph.whisper.security`; you only need TLS egress to it from the manager (see
+`https://graph.whisper.online`; you only need TLS egress to it from the manager (see
 [Prerequisites](#prerequisites)).
 
 ### Initial Whisper Configuration
@@ -188,7 +188,7 @@ JSON
 
 /var/ossec/integrations/custom-whisper.py /tmp/alert.json '' '' debug
 #   whisper: invoke ioc=185.220.101.1 type=ipv4 ...
-#   whisper: api url=https://graph.whisper.security ms=...
+#   whisper: api url=https://graph.whisper.online ms=...
 #   whisper: emit ... payload_bytes=...
 ```
 
@@ -212,7 +212,7 @@ shows `skip reason=non-global`, and no alert is produced.
   <https://github.com/whisper-sec/whisper-wazuh> (full documentation, installers, and the keyed
   agent-activity tier).
 * **Adapted by:** Whisper Security.
-* **Tested versions:** Wazuh **4.14.5**; the Whisper graph API (`graph.whisper.security`).
+* **Tested versions:** Wazuh **4.14.5**; the Whisper graph API (`graph.whisper.online`).
 * **Maintainer:** Whisper Security (`security@whisper.security`).
 * **Support boundary:** **Vendor-maintained**, best-effort via the upstream repository's issues;
   provided as-is. API keys and tiers for the keyed features: <https://www.whisper.security/pricing>.

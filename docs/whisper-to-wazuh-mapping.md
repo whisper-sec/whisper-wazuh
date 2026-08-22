@@ -264,7 +264,7 @@ integrations (`{'integration': '<name>', '<name>': {…}}`):
     "verdict": "suspicious",
     "risk_score": 7.35,
     "level": "HIGH",
-    "permalink": "https://graph.whisper.security/ip/185.220.101.1",
+    "permalink": "https://graph.whisper.online/ip/185.220.101.1",
     "graph_node_id": "ipv4/185.220.101.1",
     "source_ref": {
       "rule_id": "5710",
@@ -392,7 +392,7 @@ Illustrative payload for a phishing typosquat, exercising the richer domain shap
     "verdict": "known_bad",
     "risk_score": 62.4,
     "level": "HIGH",
-    "permalink": "https://graph.whisper.security/domain/paypa1-secure.example",
+    "permalink": "https://graph.whisper.online/domain/paypa1-secure.example",
     "graph_node_id": "hostname/paypa1-secure.example",
     "source_ref": {
       "rule_id": "62123",
@@ -930,7 +930,7 @@ socket helpers via `importlib` (one client, one dedup DB), adding no second copy
 
 ### 14.1 The `op:logs` contract (live-verified 2026-07-14)
 
-Source: `POST https://graph.whisper.security/api/query`, body
+Source: `POST https://graph.whisper.online/api/query`, body
 `{"query":"CALL whisper.agents({op:'logs', args:{from:<epoch-ms>, limit:<n>}})"}`, tenant key
 in `X-API-Key`. The task's original assumed record shape was idealized and wrong in three ways;
 the live contract is:

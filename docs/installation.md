@@ -17,7 +17,7 @@ The integration runs entirely on the manager — you don't touch your agents.
 |---|---|---|
 | A **Wazuh manager, 4.x** (single-node or cluster) | as **root** | it edits `ossec.conf`, drops files into `/var/ossec`, and restarts the manager |
 | The manager's **bundled Python 3.10** | already there | the connector is stdlib-only — nothing to `pip install` |
-| **TLS egress** to `graph.whisper.security` | from the manager | the enrichment API. For the on-demand CLI, also `mcp.whisper.security` |
+| **TLS egress** to `graph.whisper.online` | from the manager | the enrichment API. For the on-demand CLI, also `mcp.whisper.security` |
 | Your **indexer reachable** from the install host | default `https://localhost:9200`, user `admin` | the installer pushes a field-type template there first |
 | *(optional)* A **Whisper API key** | yours (BYOK) | **not needed for enrichment** — the graph is queried keyless. Required only for the *keyed* features: the [agent-activity log source](#the-agent-activity-log-source---logs) and the [on-demand CLI](#the-on-demand-cli). Get a key / compare tiers at [whisper.security/pricing](https://www.whisper.security/pricing) |
 
@@ -176,7 +176,7 @@ sensible. Changing it needs a `wazuh-control restart`.
 |---|---|---|
 | `dedup_ttl` | `3600` (s) | how long a repeat indicator is suppressed before re-enriching |
 | `dedup_scope` | `endpoint` | `endpoint` = dedup per agent; `org` = dedup globally |
-| `api_url` | `https://graph.whisper.security` | a different API base URL (include the scheme — it's used verbatim) |
+| `api_url` | `https://graph.whisper.online` | a different API base URL (include the scheme — it's used verbatim) |
 | `extra_enrichments` | *(none)* | opt into heavier fields — currently `"tls_fingerprint"` (the Cobalt-Strike JARM signal → rule 100206) |
 
 ---
@@ -195,7 +195,7 @@ A healthy enrichment is three lines — **`invoke` → `api` → `emit`**:
 
 ```
 whisper: invoke ioc=185.220.101.1 type=ipv4 dedup_key=ipv4|185.220.101.1|000
-whisper: api url=https://graph.whisper.security ms=137
+whisper: api url=https://graph.whisper.online ms=137
 whisper: emit dedup_key=ipv4|185.220.101.1|000 payload_bytes=1385
 ```
 
@@ -213,7 +213,7 @@ original. Note there are **two** alerts per event: the trigger, and the enrichme
 | `skip reason=dedup` | same indicator seen within the TTL | expected — reset `dedup.db` to re-test |
 | `skip reason=no-ioc` | the alert carried no supported indicator | check it actually has a public IP/domain |
 | `error class=auth` | key missing / placeholder / wrong | fix `/var/ossec/etc/whisper.key` or the env var |
-| `error class=transport` | can't reach `graph.whisper.security` | check egress / DNS / TLS from the manager |
+| `error class=transport` | can't reach `graph.whisper.online` | check egress / DNS / TLS from the manager |
 | **no `invoke` line at all** | the alert never reached the connector | its rule group isn't in your `--group` list, or integratord isn't enabled |
 
 Sanity that integratord even loaded it:

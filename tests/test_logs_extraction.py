@@ -8,7 +8,7 @@ def _records(wl, envelope):
 
 
 def _cfg(wl):
-    return {'api_url': 'https://graph.whisper.security', 'api_key': 'k', 'timeout': 10, 'retries': 3}
+    return {'api_url': 'https://graph.whisper.online', 'api_key': 'k', 'timeout': 10, 'retries': 3}
 
 
 class TestReconstruction:

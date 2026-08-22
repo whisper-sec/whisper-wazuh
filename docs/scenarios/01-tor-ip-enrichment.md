@@ -41,7 +41,7 @@ integratord runs `custom-whisper` on the alert; the connector extracts the globa
 
 ```
 whisper: invoke ioc=185.220.101.1 type=ipv4 dedup_key=ipv4|185.220.101.1|000
-whisper: api url=https://graph.whisper.security ms=137
+whisper: api url=https://graph.whisper.online ms=137
 whisper: emit dedup_key=ipv4|185.220.101.1|000 payload_bytes=1385
 ```
 

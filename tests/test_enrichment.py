@@ -62,7 +62,7 @@ GOOGLE_DNS_EXPLAIN = {
 
 def make_cfg_args():
     """(api_url, api_key, timeout, retries) for enrich()."""
-    return ('https://graph.whisper.security', 'test-key', 10, 3)
+    return ('https://graph.whisper.online', 'test-key', 10, 3)
 
 
 class TestCallExplain:
