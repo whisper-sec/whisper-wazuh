@@ -32,7 +32,7 @@ from urllib.parse import urlsplit
 _pwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 KEY_FILE = f'{_pwd}/etc/whisper.key'
 API_KEY_PLACEHOLDER = 'WHISPER_API_KEY_PLACEHOLDER'
-DEFAULT_API_URL = 'https://graph.whisper.security'
+DEFAULT_API_URL = 'https://graph.whisper.online'
 DEFAULT_TIMEOUT = 10
 DEFAULT_RETRIES = 3
 
