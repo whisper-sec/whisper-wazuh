@@ -22,6 +22,7 @@ the Whisper graph (#14) → inject a new alert onto the analysisd socket (#16) �
 import json
 import os
 import re
+import signal
 import socket
 import sqlite3
 import sys
@@ -35,6 +36,7 @@ from whisper_client import (
     DEFAULT_RETRIES,
     DEFAULT_TIMEOUT,
     WhisperAuthError,
+    WhisperDeadlineError,
     WhisperError,
     WhisperQueryError,
     WhisperTransportError,
@@ -186,6 +188,42 @@ def execute_query(api_url, api_key, cypher, params=None, timeout=DEFAULT_TIMEOUT
     return _client_execute_query(
         api_url, api_key, cypher, params, timeout, retries, deadline=_INVOCATION_DEADLINE
     )
+
+
+# Hard ceiling. The per-query deadline bounds every request and every retry sleep, but a socket
+# timeout is per OPERATION: a server dripping one byte at a time, or a hung resolver, resets it and
+# can hold integratord well past the budget. A SIGALRM at the deadline (+1 s grace, so the precise
+# per-query path wins whenever it can) guarantees the bound whatever the socket does. integratord
+# runs the connector as a fresh main-thread process, which is exactly where an itimer is allowed;
+# anywhere else (no SIGALRM, not the main thread) the arm is a no-op and the per-query bound stands.
+def _hard_ceiling_handler(signum, frame):
+    raise WhisperDeadlineError(
+        'hard ceiling: wall-clock budget exhausted inside a stalled socket operation or resolver lookup'
+    )
+
+
+def _arm_hard_ceiling(seconds: float):
+    """SIGALRM `seconds` from now. Returns the previous handler for _disarm_hard_ceiling, or None
+    when a timer cannot be armed here."""
+    if not hasattr(signal, 'setitimer') or not hasattr(signal, 'SIGALRM'):
+        return None
+    try:
+        previous = signal.signal(signal.SIGALRM, _hard_ceiling_handler)
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, seconds))
+        return previous
+    except (ValueError, OSError):  # not the main thread / itimers unavailable
+        return None
+
+
+def _disarm_hard_ceiling(previous) -> None:
+    if not hasattr(signal, 'setitimer') or not hasattr(signal, 'SIGALRM'):
+        return
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if previous is not None:
+            signal.signal(signal.SIGALRM, previous)
+    except (ValueError, OSError):
+        pass
 
 
 def log_always(msg: str) -> None:
@@ -1335,7 +1373,7 @@ def enrich(
                 # Context fragments are best-effort — keep the verdict + threat_feed. Running out
                 # of the invocation's wall-clock budget here is the intended outage behaviour:
                 # the verdict is already in hand, the optional context is what gets dropped.
-                if 'deadline' in str(exc):
+                if isinstance(exc, WhisperDeadlineError):
                     notes.append('context skipped (deadline)')
                 else:
                     notes.append(f'context enrichment degraded ({exc.log_class})')
@@ -1560,46 +1598,59 @@ def main(args: 'list[str]') -> int:
     global _INVOCATION_DEADLINE
     deadline = time.monotonic() + budget
     _INVOCATION_DEADLINE = deadline
-    if len(candidates) > max_iocs:
-        for ioc, _ioc_type, _field in candidates[max_iocs:]:
-            log_skip('max-iocs', ioc=ioc, limit=str(max_iocs))
-        candidates = candidates[:max_iocs]
+    previous_handler = _arm_hard_ceiling(budget + 1.0)
 
     emitted = 0
     errors = 0
-    for ioc, ioc_type, field_path in candidates:
-        if time.monotonic() >= deadline:
-            log_skip('deadline', ioc=ioc)
-            errors += 1  # the run was cut short — an all-skipped run exits non-zero (TC-13)
-            continue
-        key = make_dedup_key(ioc_type, ioc, agent_id, include_agent)
-        log_invoke(ioc, ioc_type, key)
-        if check_dedup(key, dedup_ttl):
-            log_skip('dedup', dedup_key=key)
-            continue
-        try:
-            payload = enrich(
-                ioc,
-                ioc_type,
-                key,
-                build_source_ref(alert, field_path),
-                api_url,
-                api_key,
-                timeout,
-                retries,
-                extra,
-            )
-            sent = send_event(payload, alert.get('agent'))
-            record_dedup(key, dedup_ttl)  # only after a successful emit — failures stay retryable
-            log_emit(key, sent)
-            emitted += 1
-        except WhisperAuthError as exc:
-            # Terminal: the same key fails for every remaining candidate — stop the run.
-            log_error(exc)
-            return ERR_AUTH
-        except WhisperError as exc:
-            log_error(exc)
-            errors += 1
+    attempted = 0
+    try:
+        for ioc, ioc_type, field_path in candidates:
+            if time.monotonic() >= deadline:
+                log_skip('deadline', ioc=ioc)
+                errors += 1  # the run was cut short — an all-skipped run exits non-zero (TC-13)
+                continue
+            key = make_dedup_key(ioc_type, ioc, agent_id, include_agent)
+            log_invoke(ioc, ioc_type, key)
+            if check_dedup(key, dedup_ttl):
+                log_skip('dedup', dedup_key=key)
+                continue
+            # The cap bounds real enrichment WORK, not candidates: a dedup hit costs nothing and
+            # must not use up a slot that a later, still-unscored indicator needs.
+            attempted += 1
+            if attempted > max_iocs:
+                log_skip('max-iocs', ioc=ioc, limit=str(max_iocs))
+                continue
+            try:
+                payload = enrich(
+                    ioc,
+                    ioc_type,
+                    key,
+                    build_source_ref(alert, field_path),
+                    api_url,
+                    api_key,
+                    timeout,
+                    retries,
+                    extra,
+                )
+                sent = send_event(payload, alert.get('agent'))
+                record_dedup(key, dedup_ttl)  # only after a successful emit — failures stay retryable
+                log_emit(key, sent)
+                emitted += 1
+            except WhisperAuthError as exc:
+                # Terminal: the same key fails for every remaining candidate — stop the run.
+                log_error(exc)
+                return ERR_AUTH
+            except WhisperError as exc:
+                log_error(exc)
+                errors += 1
+    except WhisperDeadlineError as exc:
+        # The hard ceiling fired outside a query (a stalled dedup/socket step): the budget is gone,
+        # so stop the whole run rather than start anything else.
+        log_error(exc)
+        errors += 1
+    finally:
+        _disarm_hard_ceiling(previous_handler)
+        _INVOCATION_DEADLINE = None  # never leak this invocation's budget into a later caller
 
     # Exit 0 when anything landed (TC-15: a successful emit must not produce an
     # 'Exit status was:' line in ossec.log); non-zero only for all-failure runs (TC-13).

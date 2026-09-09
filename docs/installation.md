@@ -169,7 +169,7 @@ The `<integration>` block can carry an `<options>` JSON string. All optional —
 sensible. Changing it needs a `wazuh-control restart`.
 
 ```xml
-<options>{"dedup_ttl": 3600, "dedup_scope": "endpoint", "extra_enrichments": ["tls_fingerprint"]}</options>
+<options>{"dedup_ttl": 3600, "dedup_scope": "endpoint", "deadline": 20, "max_iocs": 5, "extra_enrichments": ["tls_fingerprint"]}</options>
 ```
 
 | option | default | meaning |
@@ -177,8 +177,8 @@ sensible. Changing it needs a `wazuh-control restart`.
 | `dedup_ttl` | `3600` (s) | how long a repeat indicator is suppressed before re-enriching |
 | `dedup_scope` | `endpoint` | `endpoint` = dedup per agent; `org` = dedup globally |
 | `api_url` | `https://graph.whisper.online` | a different API base URL (include the scheme — it's used verbatim) |
-| `deadline` | `20` (s) | wall-clock budget for one alert's enrichment. integratord runs integrations one at a time, so this is what keeps a slow or unreachable API costing seconds, not minutes: checked before every IOC, and every query's timeout and retry backoff shrink to what's left |
-| `max_iocs` | `5` | the most indicators enriched from a single alert (each is several graph queries); extra candidates are logged as `skip reason=max-iocs` |
+| `deadline` | `20` (s) | wall-clock budget for one alert's enrichment. integratord runs integrations one at a time, so this is what keeps a slow or unreachable API costing seconds, not minutes: checked before every IOC, every query's timeout and retry backoff shrink to what's left, and a hard ceiling (an alarm at deadline + 1 s) cuts even a socket operation that stalls mid-response |
+| `max_iocs` | `5` | the most indicators actually enriched from a single alert (each is several graph queries). Cache hits don't count against it; the extra candidates are logged as `skip reason=max-iocs` |
 | `extra_enrichments` | *(none)* | opt into heavier fields — currently `"tls_fingerprint"` (the Cobalt-Strike JARM signal → rule 100506) |
 
 ---
@@ -313,6 +313,26 @@ alerts. Common lines in `whisper-logs.log`:
 | `poll hit the limit of N rows …` | truncated window — a gap alert (100515) was raised; raise `WHISPER_LOGS_LIMIT` |
 
 To exercise it on the dev stack: `make dev-logs-install` then `make dev-logs-smoke`.
+
+---
+
+## Upgrading
+
+Re-run `install.sh` **with the same flags you used the first time**. Two things it does not do
+for you:
+
+- It only touches the log-source tier when you pass `--logs`. A re-run *without* it leaves the old
+  `whisper_agent_rules.xml` and the old `whisper-logs` block in place, so if you installed the log
+  source, upgrade it with `--logs` too.
+- It re-renders the managed `<integration>` block from scratch, so **re-add any `<options>` you had**
+  afterwards (then `wazuh-control restart`).
+
+When in doubt, `uninstall.sh` then `install.sh` is the clean path.
+
+**Coming from v1.1.0 or earlier:** the rule IDs moved out of the crowded `1002xx` band
+(`100200–100206` → `100500–100506`, `100210–100215` → `100510–100515`), because they collided with
+other integrations in `wazuh/integrations` and with the `100200` default in Wazuh's own custom-rules
+docs. Repoint any dashboards, saved searches, or downstream rules keyed on the old IDs.
 
 ---
 

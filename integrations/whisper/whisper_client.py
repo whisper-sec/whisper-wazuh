@@ -76,6 +76,13 @@ class WhisperTransportError(WhisperError):
     log_class = 'transport'
 
 
+class WhisperDeadlineError(WhisperTransportError):
+    """The caller's wall-clock budget ran out (before a request, during a backoff sleep, or — via
+    the connector's SIGALRM hard ceiling — inside a stalled socket operation). A transport-class
+    outage from the operator's point of view, but typed so callers can tell budget-exhaustion
+    apart from an API error whose text happens to mention a deadline."""
+
+
 class WhisperQueryError(WhisperError):
     """Other 4xx / malformed body — likely a caller bug."""
 
@@ -169,17 +176,18 @@ def _effective_timeout(deadline: 'float | None', timeout: int) -> float:
     if remaining is None:
         return timeout
     if remaining <= 0:
-        raise WhisperTransportError('deadline exceeded before request')
+        raise WhisperDeadlineError('deadline exceeded before request')
     return max(0.1, min(timeout, remaining))
 
 
-def _sleep_within(delay: float, deadline: 'float | None') -> None:
+def _sleep_within(delay: float, deadline: 'float | None', after: str) -> None:
     """Back off for `delay` seconds (capped at BACKOFF_CAP) — but never past the deadline. If the
-    sleep would consume the remaining budget, fail now rather than sleep and then fail anyway."""
+    sleep would consume the remaining budget, fail now rather than sleep and then fail anyway.
+    `after` names what triggered the retry so the operator-facing error keeps its cause."""
     delay = min(delay, BACKOFF_CAP)
     remaining = _remaining(deadline)
     if remaining is not None and delay >= remaining:
-        raise WhisperTransportError('deadline exceeded (backoff would overrun it)')
+        raise WhisperDeadlineError(f'deadline exceeded during backoff after {after}')
     time.sleep(delay)
 
 
@@ -227,7 +235,7 @@ def execute_query(
             log_api(api_url, int((time.monotonic() - started) * 1000))
             if attempt < retries:
                 attempt += 1
-                _sleep_within(BACKOFF_BASE * (2 ** (attempt - 1)), deadline)
+                _sleep_within(BACKOFF_BASE * (2 ** (attempt - 1)), deadline, f'network error ({exc})')
                 continue
             raise WhisperTransportError(f'network error after {retries} retries: {exc}') from exc
         log_api(api_url, int((time.monotonic() - started) * 1000))
@@ -240,7 +248,7 @@ def execute_query(
                 delay = _retry_after_seconds(resp_headers)
                 if delay is None:
                     delay = BACKOFF_BASE * (2 ** (attempt - 1))
-                _sleep_within(delay, deadline)
+                _sleep_within(delay, deadline, f'HTTP {status}')
                 continue
             raise WhisperTransportError(f'HTTP {status} after {retries} retries')
         if status >= 400:

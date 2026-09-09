@@ -8,7 +8,8 @@
   to whisper.*); query them as data.whisper.* only in OpenSearch/the dashboard. Verdict/level
   matches are pcre2-anchored so a value can never substring-collide (osmatch default).
 
-  Rule ids 100500-100299 (custom range, above the built-in ceiling of 99999). The
+  Rule ids 100500-100509 (custom range, above the built-in ceiling of 99999; the agent-activity
+  log source uses the adjacent 100510-100549 band). The
   `whisper_enrichment` group is the loop guard: it MUST NOT appear in the <integration>
   trigger filter, so an enrichment alert can never re-invoke the integration (mapping §8).
   no_full_log keeps the (up to 60 KB) injected JSON envelope out of each alert's full_log —

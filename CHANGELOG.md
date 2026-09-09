@@ -15,17 +15,23 @@ Both changes come from the maintainer review of the `wazuh/integrations` submiss
   (`1password`, `socradar_ti_feeds`, `endian_mercury_utm`) and with the `100200` starting point
   Wazuh's own custom-rules docs use. analysisd keeps only the first rule carrying a duplicated ID
   and silently drops the rest, so a colliding ruleset stopped working with nothing but a line in
-  `ossec.log`. **Upgrading:** reinstall the rules (`install.sh` does it) and repoint any
-  dashboards or saved searches keyed on the old IDs.
+  `ossec.log`. **Upgrading:** re-run `install.sh` with the same flags as the original install
+  (add `--logs` if the log source is installed, or its old `100210`–`100215` rules stay on disk),
+  re-add any `<options>` you had (the installer re-renders the block), and repoint dashboards or
+  saved searches keyed on the old IDs — see [Upgrading](docs/installation.md#upgrading).
 - **A wall-clock budget for the synchronous integratord callout.** integratord runs integrations
   serially, one alert at a time, and nothing bounded the total: up to nine queries per IOC, several
   IOCs per alert, each with three retries under a 60 s backoff cap. An unreachable API measured
   87 s per alert and a rate-limited one 180 s, with every other integration blocked behind it. Now
   one per-invocation `deadline` (`<options>`, default `20` s) is checked before every IOC and
   threaded into every query, so per-request timeouts and retry backoff shrink to what is left and
-  a retry never sleeps past it; the backoff cap is `5` s; and `max_iocs` (default `5`) bounds the
-  worst case. An outage now costs seconds. New skip reasons `deadline` and `max-iocs`; a context
-  query cut by the deadline notes `context skipped (deadline)` and the verdict is kept.
+  a retry never sleeps past it; a SIGALRM hard ceiling at deadline + 1 s backs that up when a
+  socket operation itself stalls (a dripping response, a hung resolver); the backoff cap is `5` s;
+  and `max_iocs` (default `5`) bounds enrichment work per alert (cache hits do not count). An
+  outage now costs seconds: measured live on integratord, a two-IOC alert against a blackholed API
+  took 22 s (was 87 s) and against a 429 + `Retry-After: 60` server 17.5 s (was 180 s for one IOC).
+  New skip reasons `deadline` and `max-iocs`; a context query cut by the deadline notes
+  `context skipped (deadline)` and the verdict is kept.
 
 ## [1.1.0] — 2026-07-31
 
