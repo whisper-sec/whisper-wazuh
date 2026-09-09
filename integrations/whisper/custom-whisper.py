@@ -39,11 +39,13 @@ from whisper_client import (
     WhisperQueryError,
     WhisperTransportError,
     classify_domain,
-    execute_query,
     extract_url_host,
     parse_ip,
     resolve_api_key,
     resolve_api_url,
+)
+from whisper_client import (
+    execute_query as _client_execute_query,
 )
 
 # --- integratord argv contract (docs/whisper-to-wazuh-mapping.md §2.3) -----------------
@@ -82,6 +84,14 @@ MAX_EVENT_SIZE = 65535  # analysisd DGRAM datagram limit (matches maltiverse.py)
 # --- configuration defaults (resolution: <options> JSON → environment → default) --------
 # API_KEY_PLACEHOLDER / DEFAULT_API_URL / KEY_FILE imported from whisper_client.
 DEFAULT_DEDUP_TTL = 3600  # seconds — mapping §7.4
+# Wall-clock budget for ONE integratord invocation. integratord runs integrations serially, one
+# alert at a time, so a slow or blackholed API must cost seconds, not minutes: the deadline is
+# checked before every IOC and threaded into every query (timeouts + backoff shrink to what's
+# left). <options> "deadline" / WHISPER_DEADLINE, seconds.
+DEFAULT_DEADLINE = 20
+# The most IOCs enriched from a single alert (each is up to ~9 graph queries) — bounds the worst
+# case. <options> "max_iocs" / WHISPER_MAX_IOCS.
+DEFAULT_MAX_IOCS = 5
 DEFAULT_DEDUP_SCOPE = 'endpoint'  # 'endpoint' (key includes agent_id) | 'org' — mapping §7.2
 # Opt-in Tier-2 enrichments (#32). Each adds a query and/or has narrow, single-purpose
 # coverage, so all default OFF and are enabled individually via <options>.extra_enrichments.
@@ -163,6 +173,21 @@ class WhisperSocketError(WhisperError):
 debug_enabled = False
 
 
+# One wall-clock budget per invocation. integratord runs ONE alert per process, serially, so a
+# process-wide deadline is exact here: main() stamps it, and every graph query below reads it
+# through the execute_query wrapper, so retries and backoff can never overrun the budget the
+# manager is waiting on.
+_INVOCATION_DEADLINE: 'float | None' = None
+
+
+def execute_query(api_url, api_key, cypher, params=None, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES):
+    """whisper_client.execute_query bound to this invocation's deadline (_INVOCATION_DEADLINE).
+    Keeps the 6-positional contract every call site (and every test double) already uses."""
+    return _client_execute_query(
+        api_url, api_key, cypher, params, timeout, retries, deadline=_INVOCATION_DEADLINE
+    )
+
+
 def log_always(msg: str) -> None:
     """Unconditional log write (bad-argument errors are logged even with debug off)."""
     print(msg)
@@ -234,6 +259,36 @@ def resolve_dedup_ttl(options: dict, environ: dict) -> int:
         if ttl >= 0:
             return ttl
     return DEFAULT_DEDUP_TTL
+
+
+def resolve_deadline(options: dict, environ: dict) -> int:
+    """<options>.deadline → WHISPER_DEADLINE → default: the wall-clock budget (seconds) for one
+    integratord invocation. Same parsing rules as dedup_ttl; values below 1 fall through."""
+    for candidate in (options.get('deadline'), environ.get('WHISPER_DEADLINE')):
+        if candidate is None or isinstance(candidate, bool):
+            continue
+        try:
+            seconds = int(str(candidate).strip())
+        except ValueError:
+            continue
+        if seconds >= 1:
+            return seconds
+    return DEFAULT_DEADLINE
+
+
+def resolve_max_iocs(options: dict, environ: dict) -> int:
+    """<options>.max_iocs → WHISPER_MAX_IOCS → default: the most IOCs enriched from one alert
+    (each is up to ~9 graph queries, so this bounds the worst case). Values below 1 fall through."""
+    for candidate in (options.get('max_iocs'), environ.get('WHISPER_MAX_IOCS')):
+        if candidate is None or isinstance(candidate, bool):
+            continue
+        try:
+            n = int(str(candidate).strip())
+        except ValueError:
+            continue
+        if n >= 1:
+            return n
+    return DEFAULT_MAX_IOCS
 
 
 def resolve_dedup_scope(options: dict, environ: dict) -> bool:
@@ -1277,8 +1332,13 @@ def enrich(
                 else:
                     whisper.update(build_ip_fragments(cfg, ioc, ioc_type, flags, notes))
             except (WhisperTransportError, WhisperQueryError) as exc:
-                # Context fragments are best-effort — keep the verdict + threat_feed.
-                notes.append(f'context enrichment degraded ({exc.log_class})')
+                # Context fragments are best-effort — keep the verdict + threat_feed. Running out
+                # of the invocation's wall-clock budget here is the intended outage behaviour:
+                # the verdict is already in hand, the optional context is what gets dropped.
+                if 'deadline' in str(exc):
+                    notes.append('context skipped (deadline)')
+                else:
+                    notes.append(f'context enrichment degraded ({exc.log_class})')
 
     if trunc:
         whisper['truncated'] = True
@@ -1486,14 +1546,32 @@ def main(args: 'list[str]') -> int:
     dedup_ttl = resolve_dedup_ttl(options, os.environ)
     include_agent = resolve_dedup_scope(options, os.environ)
     extra = resolve_extra_enrichments(options, os.environ)
+    budget = resolve_deadline(options, os.environ)
+    max_iocs = resolve_max_iocs(options, os.environ)
     api_key = resolve_api_key(args[APIKEY_INDEX] if len(args) > APIKEY_INDEX else '', os.environ)
     timeout = _argv_int(args, TIMEOUT_INDEX, DEFAULT_TIMEOUT)
     retries = _argv_int(args, RETRIES_INDEX, DEFAULT_RETRIES)
     agent_id = str(get_nested(alert, 'agent.id') or '000')
 
+    # One wall-clock budget for the whole invocation. integratord runs integrations serially, one
+    # alert at a time, so this is what keeps a slow or blackholed API from stalling the manager:
+    # stamped once here, read by every graph query (the execute_query wrapper), and checked again
+    # before each IOC so a budget already spent skips the rest in microseconds.
+    global _INVOCATION_DEADLINE
+    deadline = time.monotonic() + budget
+    _INVOCATION_DEADLINE = deadline
+    if len(candidates) > max_iocs:
+        for ioc, _ioc_type, _field in candidates[max_iocs:]:
+            log_skip('max-iocs', ioc=ioc, limit=str(max_iocs))
+        candidates = candidates[:max_iocs]
+
     emitted = 0
     errors = 0
     for ioc, ioc_type, field_path in candidates:
+        if time.monotonic() >= deadline:
+            log_skip('deadline', ioc=ioc)
+            errors += 1  # the run was cut short — an all-skipped run exits non-zero (TC-13)
+            continue
         key = make_dedup_key(ioc_type, ioc, agent_id, include_agent)
         log_invoke(ioc, ioc_type, key)
         if check_dedup(key, dedup_ttl):

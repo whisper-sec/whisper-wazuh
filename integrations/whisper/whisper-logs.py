@@ -462,7 +462,7 @@ def advance_cursor(records: 'list[dict]') -> 'int | None':
 
 # --- emit --------------------------------------------------------------------------------
 def _gap_event(cfg: dict, cursor: 'int | None', next_cursor: 'int | None') -> dict:
-    """A self-describing telemetry-gap alert (rule 100215). Emitted when a poll hits the row limit:
+    """A self-describing telemetry-gap alert (rule 100515). Emitted when a poll hits the row limit:
     the API is newest-first with a lower-bound-only `from`, so rows below the oldest returned ts
     cannot be paged back — this makes that truncation VISIBLE in the SIEM instead of a silent gap."""
     body = {
@@ -533,7 +533,7 @@ def poll(cfg: dict) -> int:
 
         # A limit hit means the newest-first window was truncated; the older rows below the oldest
         # returned ts cannot be paged back with a lower-bound-only API, so surface the gap as an
-        # actual alert (rule 100215) rather than dropping that range silently. Only when the cursor
+        # actual alert (rule 100515) rather than dropping that range silently. Only when the cursor
         # actually advanced — if the whole batch had no usable ts (all-malformed) the cursor can't
         # move and re-emitting a gap alert every poll would be alert-spam, so log-only there.
         if limit_hit and next_cursor is not None:

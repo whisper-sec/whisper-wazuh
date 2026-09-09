@@ -42,7 +42,7 @@ into Wazuh as a *new* alert the analyst sees next to the original.
                         /var/ossec/queue/sockets/queue  (analysisd)
                                         │
                                         ▼
-                NEW alert — rule 100201 "Whisper: … KNOWN BAD (HIGH)"
+                NEW alert — rule 100501 "Whisper: … KNOWN BAD (HIGH)"
                 data.integration = custom-whisper · data.whisper.*
                                         │
                                         ▼
@@ -185,10 +185,13 @@ Verified against `virustotal.py` / `maltiverse.py` @ v4.14.5:
   `argv[6]` = timeout (default `10`) · `argv[7]` = retries (default `3`) ·
   plus a literal trailing `> /dev/null 2>&1` argument when debug is off — **read args
   positionally, never rely on `argc`.** The `<options>` JSON (argv[5]) is the config channel for
-  `api_url`, `dedup_ttl`, `dedup_scope` (`endpoint` | `org` — §7.2), and `extra_enrichments`
-  (a JSON list of opt-in Tier-2 features, default none — §12); resolution order: options →
-  environment (`WHISPER_API_URL` / `WHISPER_DEDUP_TTL` / `WHISPER_DEDUP_SCOPE` /
-  `WHISPER_EXTRA_ENRICHMENTS`) → built-in default. Scripts live in `/var/ossec/integrations/`,
+  `api_url`, `dedup_ttl`, `dedup_scope` (`endpoint` | `org` — §7.2), `extra_enrichments`
+  (a JSON list of opt-in Tier-2 features, default none — §12), `deadline` (the wall-clock budget
+  in seconds for the whole invocation, default `20`: integratord runs integrations serially, so
+  every query and every IOC is bounded by it and a retry never sleeps past it) and `max_iocs`
+  (the most IOCs enriched per alert, default `5`); resolution order: options → environment
+  (`WHISPER_API_URL` / `WHISPER_DEDUP_TTL` / `WHISPER_DEDUP_SCOPE` / `WHISPER_EXTRA_ENRICHMENTS` /
+  `WHISPER_DEADLINE` / `WHISPER_MAX_IOCS`) → built-in default. Scripts live in `/var/ossec/integrations/`,
   perms `750`, owner `root:wazuh`.
 
 ### 2.4 How `data.whisper.*` lands in the indexer
@@ -474,7 +477,7 @@ IPv6 has **no `HAS_COUNTRY` edge** — its country comes via `LOCATED_IN → CIT
 | `(ip)-[:BELONGS_TO]->(:PREFIX).name` | `prefix` | keyword | RIR/announced prefix (CIDR). |
 | `(ip)-[:BELONGS_TO]->(:PREFIX)` threat props (`threatLevel,threatScore,isThreat,threatNeighborCount`) | `prefix_threat.{level,score,is_threat,threat_neighbor_count}` | object | **#29 — rides the same `BELONGS_TO→PREFIX` traversal (no extra round-trip).** The registered prefix carries its own threat verdict independent of the ASN aggregate (verified `185.220.101.0/24` → `CRITICAL, 151 neighbors` while `AS60729` reads `NONE`), so the granular /prefix/ signal is the actionable one. **Signal-gated:** omitted entirely for benign prefixes (a `NONE` level is not emitted). ASN-level aggregate deliberately not emitted (only 2/116 k ASNs carry a non-`NONE` level; noise for hyperscalers — `asn.reputation` already scores the ASN). BGP-hijack (announced≠registered ASN) → the `bgp-hijack-exposure` on-demand workflow, not per-alert (legitimate MOAS is common). |
 | reverse `RESOLVES_TO` / co-host | `related.neighbors[]` + `related.neighbors_total` | object[] + int | **Deferred / best-effort — see §11.** A plain reverse `MATCH (h:HOSTNAME)-[:RESOLVES_TO]->(ip {name})` is rejected as an unanchored 2.6 B-node scan; needs a co-hosting workflow or passive-DNS path. Omit (with a note in `unmapped_summary`) if unavailable. |
-| `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)` | `tls.{fingerprint,kind,family,cluster_size,count}` | object | **#32 — OPT-IN (`extra_enrichments: ["tls_fingerprint"]`, §12), IPv4 only.** A JARM match; `family` (e.g. `cobalt-strike-default`) is the actionable C2 label rule 100206 keys on. `cluster_size` = IPs sharing the fingerprint (NOT a known-bad count). **Emitted only when the edge exists** — the catalog is a frozen, sparse snapshot, so absence is never rendered. Verified live: `64.227.45.20` → CS-default JARM (cluster 139) while its verdict reads `unknown` — catches C2 the feeds miss. |
+| `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)` | `tls.{fingerprint,kind,family,cluster_size,count}` | object | **#32 — OPT-IN (`extra_enrichments: ["tls_fingerprint"]`, §12), IPv4 only.** A JARM match; `family` (e.g. `cobalt-strike-default`) is the actionable C2 label rule 100506 keys on. `cluster_size` = IPs sharing the fingerprint (NOT a known-bad count). **Emitted only when the edge exists** — the catalog is a frozen, sparse snapshot, so absence is never rendered. Verified live: `64.227.45.20` → CS-default JARM (cluster 139) while its verdict reads `unknown` — catches C2 the feeds miss. |
 
 ### 5.2 Domain
 
@@ -571,46 +574,46 @@ mirroring `0490-virustotal_rules.xml` (VT uses level 12 for malicious, 3 for ben
 <group name="whisper,whisper_enrichment,">
 
   <!-- Base classifier: level 0 = no alert, just tag the decoded event -->
-  <rule id="100200" level="0">
+  <rule id="100500" level="0">
     <decoded_as>json</decoded_as>
     <field name="integration">custom-whisper</field>
     <description>Whisper enrichment event</description>
   </rule>
 
-  <rule id="100201" level="12">
-    <if_sid>100200</if_sid>
+  <rule id="100501" level="12">
+    <if_sid>100500</if_sid>
     <field name="whisper.verdict" type="pcre2">^known_bad$</field>
     <description>Whisper: $(whisper.ioc) is KNOWN BAD ($(whisper.level)) — $(whisper.tags)</description>
   </rule>
 
   <!-- Escalate a known_bad to level 14 when the graph level is CRITICAL -->
-  <rule id="100205" level="14">
-    <if_sid>100201</if_sid>
+  <rule id="100505" level="14">
+    <if_sid>100501</if_sid>
     <field name="whisper.level" type="pcre2">^CRITICAL$</field>
     <description>Whisper: $(whisper.ioc) is KNOWN BAD (CRITICAL)</description>
   </rule>
 
-  <rule id="100202" level="7">
-    <if_sid>100200</if_sid>
+  <rule id="100502" level="7">
+    <if_sid>100500</if_sid>
     <field name="whisper.verdict" type="pcre2">^suspicious$</field>
     <description>Whisper: $(whisper.ioc) is SUSPICIOUS ($(whisper.level))</description>
   </rule>
 
-  <rule id="100203" level="3">
-    <if_sid>100200</if_sid>
+  <rule id="100503" level="3">
+    <if_sid>100500</if_sid>
     <field name="whisper.verdict" type="pcre2">^known_good$</field>
     <description>Whisper: $(whisper.ioc) is known good</description>
   </rule>
 
-  <rule id="100204" level="3">
-    <if_sid>100200</if_sid>
+  <rule id="100504" level="3">
+    <if_sid>100500</if_sid>
     <field name="whisper.verdict" type="pcre2">^unknown$</field>
     <description>Whisper: no graph data for $(whisper.ioc)</description>
   </rule>
 
   <!-- #32 opt-in: escalates a Cobalt Strike JARM INDEPENDENT of verdict (usually 'unknown') -->
-  <rule id="100206" level="12">
-    <if_sid>100200</if_sid>
+  <rule id="100506" level="12">
+    <if_sid>100500</if_sid>
     <field name="whisper.tls.family" type="pcre2">^cobalt-strike-default$</field>
     <description>Whisper: $(whisper.ioc) emits a Cobalt Strike default JARM fingerprint (possible C2)</description>
   </rule>
@@ -620,11 +623,11 @@ mirroring `0490-virustotal_rules.xml` (VT uses level 12 for malicious, 3 for ben
 
 | `verdict` | rule level | rationale |
 |---|---|---|
-| `known_bad` | 12; **14** when `level == CRITICAL` (rule 100205) | 12 = VT-malicious parity; 14 is a Whisper-specific escalation, not a VT precedent |
+| `known_bad` | 12; **14** when `level == CRITICAL` (rule 100505) | 12 = VT-malicious parity; 14 is a Whisper-specific escalation, not a VT precedent |
 | `suspicious` | 7 | analyst-review band |
 | `known_good` | 3 | low-noise informational |
 | `unknown` | 3 (set to 0 to suppress — a noise-policy call, §11 Q8) | informational |
-| — (TLS C2, rule 100206) | 12, **verdict-independent** | opt-in `tls.family == cobalt-strike-default`; fires even when the verdict is `unknown` (feeds miss it), §12 |
+| — (TLS C2, rule 100506) | 12, **verdict-independent** | opt-in `tls.family == cobalt-strike-default`; fires even when the verdict is `unknown` (feeds miss it), §12 |
 
 Two matching subtleties, both handled above:
 
@@ -632,9 +635,9 @@ Two matching subtleties, both handled above:
   non-substring today, but they are anchored with `type="pcre2">^…$` so a future verdict value —
   or a stray `explanation` string — can never false-match.
 - The field names carry **no `data.` prefix** (§2.2). Children omit `<decoded_as>` (only the base
-  rule 100200 needs it) — matching the in-tree VT/maltiverse rule pattern.
+  rule 100500 needs it) — matching the in-tree VT/maltiverse rule pattern.
 
-The `whisper_enrichment` group and rule-id range `100200+` (native rules stay below 100000) matter
+The `whisper_enrichment` group and rule-id range `100500+` (native rules stay below 100000) matter
 for feedback-loop prevention (§8).
 
 ---
@@ -863,7 +866,7 @@ unknown name is silently ignored (a typo disables, never errors). Enable example
 
 | key | fields | notes |
 |---|---|---|
-| `tls_fingerprint` | `tls.{fingerprint,kind,family,cluster_size,count}` (IPv4) | `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)`. 100 % of edges are `cobalt-strike-default` JARM; ~97 % of emitters read clean in feeds → **catches C2 the feeds miss**. Emitted only when the edge exists (frozen, sparse catalog — absence never rendered). Escalated by rule 100206 (level 12, verdict-independent). |
+| `tls_fingerprint` | `tls.{fingerprint,kind,family,cluster_size,count}` (IPv4) | `(ip)-[:EMITS_TLS_FINGERPRINT]->(:TLS_FINGERPRINT)`. 100 % of edges are `cobalt-strike-default` JARM; ~97 % of emitters read clean in feeds → **catches C2 the feeds miss**. Emitted only when the edge exists (frozen, sparse catalog — absence never rendered). Escalated by rule 100506 (level 12, verdict-independent). |
 
 **Evaluated and dropped (grounded live 2026-07-12 — data would mislead, not help):**
 
@@ -966,7 +969,7 @@ lower-bound-only API; the poller therefore does **one request per poll** (`from:
 limit:N`), emits every returned row, and advances the cursor to `max(ts)+1`. If a poll returns at
 least `limit` rows the window was truncated — with a lower-bound-only, newest-first API the older
 rows below the oldest returned `ts` cannot be paged back, so rather than drop them silently the
-poller **emits a telemetry-gap alert** (`kind=gap` → rule 100215, §14.5) recommending a larger
+poller **emits a telemetry-gap alert** (`kind=gap` → rule 100515, §14.5) recommending a larger
 `WHISPER_LOGS_LIMIT` (cap 10000) or a shorter interval. The gap is thus visible in the SIEM, not
 just in `whisper-logs.log`.
 The cursor is persisted at `/var/ossec/var/whisper/logs-cursor` (`{"from":<epoch-ms>}`,
@@ -1004,13 +1007,13 @@ analysisd would index a JSON `null` as the literal string `"null"`).
 
 ### 14.5 Rules & the loop guard
 
-`whisper_agent_rules.xml`, ids **100210–100249**, group `whisper,whisper_agent_activity,`
-(disjoint from the enrichment `whisper_enrichment` group and its 100200–100209 band). Base
-**100210** (level 0): `decoded_as json` + `integration ^whisper-logs$`. Children key on
-`whisper_agent.kind`/`decision` (no `data.` prefix, pcre2-anchored): **100211** dns
-`decision=refused` → level 6 (policy block); **100212** dns `decision=allow` → level 3 (info;
-set level 0 to suppress the noise); **100213** conn → level 3; **100214** alloc → level 4;
-**100215** `kind=gap` → level 8 (a poll hit the row limit and truncated its window — see §14.2).
+`whisper_agent_rules.xml`, ids **100510–100549**, group `whisper,whisper_agent_activity,`
+(disjoint from the enrichment `whisper_enrichment` group and its 100500–100509 band). Base
+**100510** (level 0): `decoded_as json` + `integration ^whisper-logs$`. Children key on
+`whisper_agent.kind`/`decision` (no `data.` prefix, pcre2-anchored): **100511** dns
+`decision=refused` → level 6 (policy block); **100512** dns `decision=allow` → level 3 (info;
+set level 0 to suppress the noise); **100513** conn → level 3; **100514** alloc → level 4;
+**100515** `kind=gap` → level 8 (a poll hit the row limit and truncated its window — see §14.2).
 The `whisper_agent_activity` token is in **no** `<integration>` trigger filter, and the poller
 writes to its own spool/socket (not via integratord), so these alerts can never form a
 feedback loop.
@@ -1031,6 +1034,11 @@ it resolves at runtime only.
 
 ## Change log / provenance
 
+- **v1.9 (2026-09-09):** upstream review of the `wazuh/integrations` submission. Rule IDs moved
+  `100200`–`100249` → `100500`–`100549` (a `+300` shift; the old band collided with three merged
+  integrations and with Wazuh's own custom-rules default), and a per-invocation wall-clock
+  `deadline` plus `max_iocs` (§2.3) now bound the synchronous integratord callout. Provenance
+  entries below cite rule IDs as they were at the time.
 - **v1.8 (2026-07-28):** #35 — added §14 (agent-activity **log source**, keyed tier). Documents
   the live-verified columnar `op:logs` contract (epoch-ms `ts`, bare `agent` id, no `/128`/fqdn),
   the `from`-only watermark (the assumed `since`/`to` do not filter), the single-shot descending

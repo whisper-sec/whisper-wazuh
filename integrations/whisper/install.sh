@@ -314,7 +314,7 @@ while [ $tries -lt 15 ]; do
         log "install complete. Trigger groups: $FILTER_GROUPS"
         if [ "$LOGS_MODE" = "1" ]; then
             log "log source installed: whisper-logs poller (60s wodle) -> $LOGS_SPOOL -> logcollector"
-            log "  rules: whisper_agent_rules.xml (100210-100215). Ensure the tenant API key is set"
+            log "  rules: whisper_agent_rules.xml (100510-100515). Ensure the tenant API key is set"
             log "  (WHISPER_API_KEY env for the manager, or $KEY_FILE) so op:logs can authenticate."
             # Best-effort: confirm modulesd/logcollector actually picked up the new block (the
             # manager can start while silently dropping a malformed wodle/localfile).
