@@ -5,9 +5,15 @@ All notable changes to whisper-wazuh. The format loosely follows
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-10
+
+Hardens the enrichment connector after the `wazuh/integrations` maintainer review, moves the rule
+IDs out of the crowded `1002xx` band, and aligns the licence metadata with the MIT relicense.
+**Upgrading from 1.1.0 changes rule IDs**; see the notes under each item.
+
 ### Changed
 
-Both changes come from the maintainer review of the `wazuh/integrations` submission.
+The first two changes come from the maintainer review of the `wazuh/integrations` submission.
 
 - **Rule IDs moved out of the `100200`–`100249` band.** Enrichment is now `100500`–`100506` and
   the agent-activity log source `100510`–`100515`: a uniform `+300` shift, structure and levels
@@ -32,6 +38,10 @@ Both changes come from the maintainer review of the `wazuh/integrations` submiss
   took 22 s (was 87 s) and against a 429 + `Retry-After: 60` server 17.5 s (was 180 s for one IOC).
   New skip reasons `deadline` and `max-iocs`; a context query cut by the deadline notes
   `context skipped (deadline)` and the verdict is kept.
+- **Licence metadata says MIT everywhere.** The project was relicensed from Apache-2.0 to MIT
+  (matching the Whisper SDKs; still GPLv2-compatible), but only `LICENSE` changed at the time. The
+  package metadata (`.deb`/`.rpm`), the script headers, the README, CONTRIBUTING and the
+  `wazuh/integrations` submission notes now say MIT too.
 
 ## [1.1.0] — 2026-07-31
 
@@ -89,6 +99,7 @@ interpreter); bring your own Whisper API key.
   [acceptance criteria](docs/mvp-acceptance-criteria.md), and a captured
   [scenario](docs/scenarios/01-tor-ip-enrichment.md).
 
-[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.0.0

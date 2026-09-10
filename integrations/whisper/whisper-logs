@@ -8,7 +8,7 @@
 # Like custom-whisper, it always pairs the .py next to itself and FAILS LOUDLY when the
 # interpreter or script is missing rather than handing Python an empty program path.
 #
-# Copyright (C) whisper.security — Apache-2.0
+# Copyright (C) whisper.security — MIT
 
 WPYTHON_BIN="framework/python/bin/python3"
 

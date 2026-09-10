@@ -89,4 +89,4 @@ See [dev/README.md](dev/README.md) for the full guide (domains, ports, agent/tes
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
