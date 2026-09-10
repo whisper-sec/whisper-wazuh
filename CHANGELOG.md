@@ -40,8 +40,10 @@ The first two changes come from the maintainer review of the `wazuh/integrations
   `context skipped (deadline)` and the verdict is kept.
 - **Licence metadata says MIT everywhere.** The project was relicensed from Apache-2.0 to MIT
   (matching the Whisper SDKs; still GPLv2-compatible), but only `LICENSE` changed at the time. The
-  package metadata (`.deb`/`.rpm`), the script headers, the README, CONTRIBUTING and the
-  `wazuh/integrations` submission notes now say MIT too.
+  package metadata (`.deb`/`.rpm`), the README, CONTRIBUTING and the `wazuh/integrations`
+  submission notes now say MIT too, and the three script headers defer to the repository's
+  `LICENSE` instead of naming a licence (the copy contributed to `wazuh/integrations` is under that
+  repository's AGPL-3.0, and a header naming MIT there was misleading).
 
 ## [1.1.0] — 2026-07-31
 
