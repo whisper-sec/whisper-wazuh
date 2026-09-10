@@ -15,7 +15,7 @@ priority: optional
 maintainer: Whisper Security <security@whisper.security>
 vendor: Whisper Security
 homepage: https://github.com/whisper-sec/whisper-wazuh
-license: Apache-2.0
+license: MIT
 description: |
   Whisper threat-intelligence enrichment integration for Wazuh.
   Enriches Wazuh alerts with context from the Whisper infrastructure graph, and adds an

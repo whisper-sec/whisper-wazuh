@@ -9,7 +9,7 @@
 # would otherwise exec an empty ${PYTHON_SCRIPT}, handing the alert tmp file to
 # Python as the program.
 #
-# Copyright (C) whisper.security — Apache-2.0
+# Copyright (C) whisper.security — MIT
 
 WPYTHON_BIN="framework/python/bin/python3"
 
