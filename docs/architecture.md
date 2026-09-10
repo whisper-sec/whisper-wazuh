@@ -103,7 +103,7 @@ This is the important flow — the numbered steps from the picture, spelled out:
      1:custom-whisper:{"whisper":{"verdict":"suspicious", …}}
 
   7. analysisd re-decodes it, OUR RULES match, and assign a LEVEL
-     verdict "suspicious"  →  rule 100202  →  level 7
+     verdict "suspicious"  →  rule 100502  →  level 7
 
   8. The indexer TEMPLATE coerces the field types (analysisd stringifies everything),
      so numbers stay numbers and range queries work
@@ -173,7 +173,7 @@ Design choices worth knowing:
 - **Incremental with a cursor.** Because nothing pushes to it, it pulls: a persisted `from` watermark,
   advanced each poll. The API is newest-first with a lower-bound-only filter, so if a poll hits its row
   limit the older tail can't be paged back — rather than lose it silently, the poller raises a **telemetry
-  gap alert** (rule 100215) so the truncation is visible in the SIEM.
+  gap alert** (rule 100515) so the truncation is visible in the SIEM.
 
 The field-by-field contract is [mapping §14](whisper-to-wazuh-mapping.md#14-log-source--agent-activity--wazuh-keyed-tier-35);
 the admin how-to is in [installation.md](installation.md#the-agent-activity-log-source---logs).

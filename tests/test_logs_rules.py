@@ -15,13 +15,13 @@ def _rules(filename):
 class TestAgentRules:
     def test_well_formed_and_id_range(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        assert set(rules) == {'100210', '100211', '100212', '100213', '100214', '100215'}
+        assert set(rules) == {'100510', '100511', '100512', '100513', '100514', '100515'}
         for rid in rules:
-            assert 100210 <= int(rid) <= 100249
+            assert 100510 <= int(rid) <= 100549
 
     def test_base_classifier(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        base = rules['100210']
+        base = rules['100510']
         assert base.get('level') == '0'
         assert base.find('decoded_as').text == 'json'
         field = base.find('field')
@@ -31,33 +31,33 @@ class TestAgentRules:
     def test_kind_decision_level_map(self):
         _, rules = _rules('whisper_agent_rules.xml')
         # dns refused → 6, dns allow → 3, conn → 3, alloc → 4, gap → 8
-        expected = {'100211': '6', '100212': '3', '100213': '3', '100214': '4', '100215': '8'}
+        expected = {'100511': '6', '100512': '3', '100513': '3', '100514': '4', '100515': '8'}
         for rid, level in expected.items():
             r = rules[rid]
             assert r.get('level') == level
-            assert r.find('if_sid').text == '100210'
+            assert r.find('if_sid').text == '100510'
 
     def test_gap_rule_keys_on_kind(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        gap = {f.get('name'): f.text for f in rules['100215'].findall('field')}
+        gap = {f.get('name'): f.text for f in rules['100515'].findall('field')}
         assert gap['whisper_agent.kind'] == '^gap$'
-        assert 'whisper_agent_gap' in rules['100215'].find('group').text
+        assert 'whisper_agent_gap' in rules['100515'].find('group').text
 
     def test_refused_requires_kind_and_decision(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        fields = {f.get('name'): f.text for f in rules['100211'].findall('field')}
+        fields = {f.get('name'): f.text for f in rules['100511'].findall('field')}
         assert fields['whisper_agent.kind'] == '^dns$'
         assert fields['whisper_agent.decision'] == '^refused$'
 
     def test_allow_decision_distinct_from_refused(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        fields = {f.get('name'): f.text for f in rules['100212'].findall('field')}
+        fields = {f.get('name'): f.text for f in rules['100512'].findall('field')}
         assert fields['whisper_agent.decision'] == '^allow$'
 
     def test_conn_and_alloc_key_on_kind(self):
         _, rules = _rules('whisper_agent_rules.xml')
-        conn = {f.get('name'): f.text for f in rules['100213'].findall('field')}
-        alloc = {f.get('name'): f.text for f in rules['100214'].findall('field')}
+        conn = {f.get('name'): f.text for f in rules['100513'].findall('field')}
+        alloc = {f.get('name'): f.text for f in rules['100514'].findall('field')}
         assert conn['whisper_agent.kind'] == '^conn$'
         assert alloc['whisper_agent.kind'] == '^alloc$'
 
@@ -81,7 +81,7 @@ class TestLoopGuardSeparation:
         """The log-source group/ids never collide with the enrichment ruleset."""
         _, agent = _rules('whisper_agent_rules.xml')
         _, enrich = _rules('whisper_rules.xml')
-        assert set(agent).isdisjoint(set(enrich))  # 100210+ vs 100200-100209
+        assert set(agent).isdisjoint(set(enrich))  # 100510+ vs 100500-100509
         enrich_root = ET.parse(WHISPER / 'whisper_rules.xml').getroot()
         assert 'whisper_agent_activity' not in enrich_root.get('name')
 

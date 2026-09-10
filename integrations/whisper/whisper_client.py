@@ -41,7 +41,10 @@ CONNECTOR_VERSION = '1.0'
 # Must NOT start with 'Python-urllib' — the Whisper API WAF blocks that default UA.
 USER_AGENT = f'whisper-wazuh-connector/{CONNECTOR_VERSION}'
 BACKOFF_BASE = 0.5
-BACKOFF_CAP = 60.0
+# A few seconds, not 60: the connector runs inside a SYNCHRONOUS integratord callout (one alert
+# at a time, every other integration blocked behind it), so a long backoff sleep stalls the whole
+# manager. Retry-After values above the cap are clamped to it.
+BACKOFF_CAP = 5.0
 # Common CA-bundle locations, tried when the interpreter's compiled-in paths are empty.
 _CA_BUNDLE_CANDIDATES = (
     '/etc/ssl/certs/ca-certificates.crt',  # Debian/Ubuntu (Wazuh manager image)
@@ -71,6 +74,13 @@ class WhisperTransportError(WhisperError):
     """Network / 5xx / 429-after-retries — transient."""
 
     log_class = 'transport'
+
+
+class WhisperDeadlineError(WhisperTransportError):
+    """The caller's wall-clock budget ran out (before a request, during a backoff sleep, or — via
+    the connector's SIGALRM hard ceiling — inside a stalled socket operation). A transport-class
+    outage from the operator's point of view, but typed so callers can tell budget-exhaustion
+    apart from an API error whose text happens to mention a deadline."""
 
 
 class WhisperQueryError(WhisperError):
@@ -153,6 +163,34 @@ def _retry_after_seconds(headers: dict) -> 'float | None':
         return None
 
 
+def _remaining(deadline: 'float | None') -> 'float | None':
+    """Seconds left before the caller's wall-clock deadline (a time.monotonic() stamp), or None
+    when the caller set no deadline."""
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def _effective_timeout(deadline: 'float | None', timeout: int) -> float:
+    """The per-request socket timeout, shrunk to whatever is left of the deadline. Raises once the
+    deadline has passed so a caller never starts a request it cannot finish in budget."""
+    remaining = _remaining(deadline)
+    if remaining is None:
+        return timeout
+    if remaining <= 0:
+        raise WhisperDeadlineError('deadline exceeded before request')
+    return max(0.1, min(timeout, remaining))
+
+
+def _sleep_within(delay: float, deadline: 'float | None', after: str) -> None:
+    """Back off for `delay` seconds (capped at BACKOFF_CAP) — but never past the deadline. If the
+    sleep would consume the remaining budget, fail now rather than sleep and then fail anyway.
+    `after` names what triggered the retry so the operator-facing error keeps its cause."""
+    delay = min(delay, BACKOFF_CAP)
+    remaining = _remaining(deadline)
+    if remaining is not None and delay >= remaining:
+        raise WhisperDeadlineError(f'deadline exceeded during backoff after {after}')
+    time.sleep(delay)
+
+
 def execute_query(
     api_url: str,
     api_key: 'str | None',
@@ -160,6 +198,7 @@ def execute_query(
     params: 'dict | None' = None,
     timeout: int = DEFAULT_TIMEOUT,
     retries: int = DEFAULT_RETRIES,
+    deadline: 'float | None' = None,
 ) -> 'list[dict]':
     """POST one Cypher query to /api/query; return `rows` (list of dicts keyed by column name).
 
@@ -168,6 +207,11 @@ def execute_query(
       429 / 5xx after retries    → WhisperTransportError (Retry-After honoured per attempt)
       network failure            → WhisperTransportError
       other 4xx / bad body       → WhisperQueryError
+
+    `deadline` (an optional time.monotonic() stamp) bounds the WHOLE call, retries included: each
+    request's socket timeout shrinks to what is left, and a retry that would sleep past the
+    deadline raises WhisperTransportError instead of sleeping. This is what keeps a synchronous
+    integratord callout to seconds when the API is slow or unreachable.
     """
     # An explicit User-Agent is REQUIRED: the Whisper API's WAF 403s urllib's default
     # `Python-urllib/x.y` UA (verified live 2026-07-11). Any non-default UA passes.
@@ -183,7 +227,7 @@ def execute_query(
     while True:
         started = time.monotonic()
         try:
-            status, raw, resp_headers = _http_post(url, body, headers, timeout)
+            status, raw, resp_headers = _http_post(url, body, headers, _effective_timeout(deadline, timeout))
         except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
             # http.client.HTTPException (BadStatusLine/IncompleteRead) is NOT an OSError —
             # catch it explicitly so a garbled response stays inside the retry budget and
@@ -191,7 +235,7 @@ def execute_query(
             log_api(api_url, int((time.monotonic() - started) * 1000))
             if attempt < retries:
                 attempt += 1
-                time.sleep(min(BACKOFF_BASE * (2 ** (attempt - 1)), BACKOFF_CAP))
+                _sleep_within(BACKOFF_BASE * (2 ** (attempt - 1)), deadline, f'network error ({exc})')
                 continue
             raise WhisperTransportError(f'network error after {retries} retries: {exc}') from exc
         log_api(api_url, int((time.monotonic() - started) * 1000))
@@ -204,7 +248,7 @@ def execute_query(
                 delay = _retry_after_seconds(resp_headers)
                 if delay is None:
                     delay = BACKOFF_BASE * (2 ** (attempt - 1))
-                time.sleep(min(delay, BACKOFF_CAP))
+                _sleep_within(delay, deadline, f'HTTP {status}')
                 continue
             raise WhisperTransportError(f'HTTP {status} after {retries} retries')
         if status >= 400:

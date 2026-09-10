@@ -169,7 +169,7 @@ The `<integration>` block can carry an `<options>` JSON string. All optional —
 sensible. Changing it needs a `wazuh-control restart`.
 
 ```xml
-<options>{"dedup_ttl": 3600, "dedup_scope": "endpoint", "extra_enrichments": ["tls_fingerprint"]}</options>
+<options>{"dedup_ttl": 3600, "dedup_scope": "endpoint", "deadline": 20, "max_iocs": 5, "extra_enrichments": ["tls_fingerprint"]}</options>
 ```
 
 | option | default | meaning |
@@ -177,7 +177,9 @@ sensible. Changing it needs a `wazuh-control restart`.
 | `dedup_ttl` | `3600` (s) | how long a repeat indicator is suppressed before re-enriching |
 | `dedup_scope` | `endpoint` | `endpoint` = dedup per agent; `org` = dedup globally |
 | `api_url` | `https://graph.whisper.online` | a different API base URL (include the scheme — it's used verbatim) |
-| `extra_enrichments` | *(none)* | opt into heavier fields — currently `"tls_fingerprint"` (the Cobalt-Strike JARM signal → rule 100206) |
+| `deadline` | `20` (s) | wall-clock budget for one alert's enrichment. integratord runs integrations one at a time, so this is what keeps a slow or unreachable API costing seconds, not minutes: checked before every IOC, every query's timeout and retry backoff shrink to what's left, and a hard ceiling (an alarm at deadline + 1 s) cuts even a socket operation that stalls mid-response |
+| `max_iocs` | `5` | the most indicators actually enriched from a single alert (each is several graph queries). Cache hits don't count against it; the extra candidates are logged as `skip reason=max-iocs` |
+| `extra_enrichments` | *(none)* | opt into heavier fields — currently `"tls_fingerprint"` (the Cobalt-Strike JARM signal → rule 100506) |
 
 ---
 
@@ -200,7 +202,7 @@ whisper: emit dedup_key=ipv4|185.220.101.1|000 payload_bytes=1385
 ```
 
 Then in the dashboard (**Discover → `wazuh-alerts-*`**) search `data.whisper.ioc:<the IP>` — you'll
-see a new enrichment alert (e.g. *"Whisper: … is SUSPICIOUS (HIGH)"*, rule 100202) next to the
+see a new enrichment alert (e.g. *"Whisper: … is SUSPICIOUS (HIGH)"*, rule 100502) next to the
 original. Note there are **two** alerts per event: the trigger, and the enrichment linked to it by
 `source_ref` — see [architecture.md](architecture.md) for why.
 
@@ -270,11 +272,11 @@ Each poll writes `data.whisper_agent.*` alerts that these rules render:
 
 | rule | fires on | level |
 |---|---|---|
-| `100211` | DNS the agent's policy **refused** (a block) | 6 |
-| `100212` | DNS the agent **allowed** (informational — set level 0 to silence) | 3 |
-| `100213` | egress **connection** (open/closed) | 3 |
-| `100214` | new agent **identity** allocated | 4 |
-| `100215` | **telemetry gap** — a poll hit its row limit and truncated the window | 8 |
+| `100511` | DNS the agent's policy **refused** (a block) | 6 |
+| `100512` | DNS the agent **allowed** (informational — set level 0 to silence) | 3 |
+| `100513` | egress **connection** (open/closed) | 3 |
+| `100514` | new agent **identity** allocated | 4 |
+| `100515` | **telemetry gap** — a poll hit its row limit and truncated the window | 8 |
 
 The agent-activity rules carry a `whisper_agent_activity` group that's **disjoint** from the enrichment
 groups, so these alerts can never loop back and re-trigger enrichment (`install.sh` also rejects
@@ -288,7 +290,7 @@ wodle, set them where the manager reads its environment, then `wazuh-control res
 | variable | default | meaning |
 |---|---|---|
 | `WHISPER_LOGS_SINK` | `logcollector` | `logcollector` (append to the JSON spool, tailed) or `socket` (inject on the analysisd queue directly) |
-| `WHISPER_LOGS_LIMIT` | `1000` (cap `10000`) | rows pulled per poll; hitting it raises the gap alert (rule 100215) — raise this or shorten the interval |
+| `WHISPER_LOGS_LIMIT` | `1000` (cap `10000`) | rows pulled per poll; hitting it raises the gap alert (rule 100515) — raise this or shorten the interval |
 | `WHISPER_LOGS_KINDS` | `all` | restrict to a CSV subset of `dns,conn,alloc` |
 | `WHISPER_LOGS_AGENT` | *(none)* | restrict to a single agent id |
 | `WHISPER_LOGS_SPOOL` | `/var/ossec/logs/whisper-agent-activity.json` | the NDJSON spool path |
@@ -308,9 +310,29 @@ alerts. Common lines in `whisper-logs.log`:
 | `poll complete: emitted=N` | ✅ N agent-activity events ingested |
 | `no API key resolved …` | the keyed tier needs the tenant key — set `WHISPER_API_KEY` / the key file |
 | `auth error (terminal)` | the key is wrong/expired for `op:logs` |
-| `poll hit the limit of N rows …` | truncated window — a gap alert (100215) was raised; raise `WHISPER_LOGS_LIMIT` |
+| `poll hit the limit of N rows …` | truncated window — a gap alert (100515) was raised; raise `WHISPER_LOGS_LIMIT` |
 
 To exercise it on the dev stack: `make dev-logs-install` then `make dev-logs-smoke`.
+
+---
+
+## Upgrading
+
+Re-run `install.sh` **with the same flags you used the first time**. Two things it does not do
+for you:
+
+- It only touches the log-source tier when you pass `--logs`. A re-run *without* it leaves the old
+  `whisper_agent_rules.xml` and the old `whisper-logs` block in place, so if you installed the log
+  source, upgrade it with `--logs` too.
+- It re-renders the managed `<integration>` block from scratch, so **re-add any `<options>` you had**
+  afterwards (then `wazuh-control restart`).
+
+When in doubt, `uninstall.sh` then `install.sh` is the clean path.
+
+**Coming from v1.1.0 or earlier:** the rule IDs moved out of the crowded `1002xx` band
+(`100200–100206` → `100500–100506`, `100210–100215` → `100510–100515`), because they collided with
+other integrations in `wazuh/integrations` and with the `100200` default in Wazuh's own custom-rules
+docs. Repoint any dashboards, saved searches, or downstream rules keyed on the old IDs.
 
 ---
 

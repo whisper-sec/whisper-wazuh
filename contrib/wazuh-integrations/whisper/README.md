@@ -122,6 +122,16 @@ curl -sk -u <indexer-user>:<indexer-pass> -XPUT "https://<indexer>:9200/_templat
 domain becomes one graph lookup (deduped by a small cache). Start narrow (e.g. `sshd`) and widen
 deliberately. Never point it at a group the enrichment alerts themselves carry.
 
+The callout is synchronous (integratord runs one alert at a time), so the connector keeps a
+wall-clock budget per invocation and never lets a slow or unreachable API stall the manager. Two
+optional `<options>` knobs tune it: `deadline` (seconds per alert, default `20`; every query's
+timeout and retry backoff shrink to what is left) and `max_iocs` (indicators enriched per alert,
+default `5`):
+
+```xml
+<options>{"deadline": 20, "max_iocs": 5}</options>
+```
+
 **5. Restart the manager** after these changes:
 
 ```bash
@@ -147,11 +157,11 @@ The verdict → alert-level mapping (bundled rules):
 
 | Verdict | Meaning | Rule | Level |
 |---|---|---|---|
-| `known_bad` | confirmed-malicious evidence (C2 / malware / phishing) | 100201 | 12 |
-| `known_bad` (CRITICAL) | as above, with a critical graph score | 100205 | 14 |
-| `suspicious` | a threat signal without a confirmed-bad category (e.g. Tor / anonymizer) | 100202 | 7 |
-| `known_good` | allowlist-vouched, no threat | 100203 | 3 |
-| `unknown` | no data at this granularity (no-data ≠ safe) | 100204 | 3 |
+| `known_bad` | confirmed-malicious evidence (C2 / malware / phishing) | 100501 | 12 |
+| `known_bad` (CRITICAL) | as above, with a critical graph score | 100505 | 14 |
+| `suspicious` | a threat signal without a confirmed-bad category (e.g. Tor / anonymizer) | 100502 | 7 |
+| `known_good` | allowlist-vouched, no threat | 100503 | 3 |
+| `unknown` | no data at this granularity (no-data ≠ safe) | 100504 | 3 |
 
 ---
 
@@ -168,11 +178,11 @@ echo 'integrator.debug=2' >> /var/ossec/etc/local_internal_options.conf
 disk, so it confirms `whisper_rules.xml` maps a verdict to the right level:
 
 ```bash
-# suspicious (a Tor exit) → rule 100202, level 7
+# suspicious (a Tor exit) → rule 100502, level 7
 printf '%s\n' '{"integration":"custom-whisper","whisper":{"ioc":"185.220.101.1","verdict":"suspicious","level":"HIGH"}}' | /var/ossec/bin/wazuh-logtest
-#   Phase 3: id '100202'  level '7'  "Whisper: 185.220.101.1 is SUSPICIOUS (HIGH)"
+#   Phase 3: id '100502'  level '7'  "Whisper: 185.220.101.1 is SUSPICIOUS (HIGH)"
 
-# known_good → rule 100203 (level 3);  known_bad → rule 100201 (level 12)
+# known_good → rule 100503 (level 3);  known_bad → rule 100501 (level 12)
 ```
 
 **Test 2 — the connector enriches a live indicator (end to end).** Run the connector against a
@@ -198,7 +208,7 @@ JSON
   `/var/ossec/logs/ossec.log`; the decoded enrichment event is in
   `/var/ossec/logs/archives/archives.log` when archiving is enabled.
 * In the **Wazuh dashboard** (Discover → `wazuh-alerts-*`), search `data.whisper.ioc:185.220.101.1`
-  — a new enrichment alert (e.g. rule 100202, *"Whisper: … is SUSPICIOUS (HIGH)"*) appears next to
+  — a new enrichment alert (e.g. rule 100502, *"Whisper: … is SUSPICIOUS (HIGH)"*) appears next to
   the original.
 
 Private / non-global IPs are skipped by design — `grep whisper: /var/ossec/logs/integrations.log`

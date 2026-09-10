@@ -17,21 +17,21 @@ def _rules(filename):
 class TestWhisperRules:
     def test_well_formed_and_ids(self):
         rules = _rules('whisper_rules.xml')
-        assert set(rules) == {'100200', '100201', '100202', '100203', '100204', '100205', '100206'}
+        assert set(rules) == {'100500', '100501', '100502', '100503', '100504', '100505', '100506'}
 
     def test_tls_c2_rule(self):
         """#32: the opt-in TLS-fingerprint rule escalates a Cobalt Strike JARM to level 12
         INDEPENDENT of verdict (chains off the base classifier, not off a verdict rule)."""
-        r = _rules('whisper_rules.xml')['100206']
+        r = _rules('whisper_rules.xml')['100506']
         assert r.get('level') == '12'
-        assert r.find('if_sid').text == '100200'  # base classifier, NOT a verdict rule
+        assert r.find('if_sid').text == '100500'  # base classifier, NOT a verdict rule
         field = r.find('field')
         assert field.get('name') == 'whisper.tls.family'  # un-prefixed
         assert field.get('type') == 'pcre2' and field.text == '^cobalt-strike-default$'
         assert 'whisper_c2' in r.find('group').text
 
     def test_base_classifier(self):
-        base = _rules('whisper_rules.xml')['100200']
+        base = _rules('whisper_rules.xml')['100500']
         assert base.get('level') == '0'
         assert base.find('decoded_as').text == 'json'
         field = base.find('field')
@@ -41,22 +41,22 @@ class TestWhisperRules:
     def test_verdict_to_level_mapping(self):
         rules = _rules('whisper_rules.xml')
         expected = {  # rule id -> (level, verdict-or-level match)
-            '100201': ('12', '^known_bad$'),
-            '100202': ('7', '^suspicious$'),
-            '100203': ('3', '^known_good$'),
-            '100204': ('3', '^unknown$'),
+            '100501': ('12', '^known_bad$'),
+            '100502': ('7', '^suspicious$'),
+            '100503': ('3', '^known_good$'),
+            '100504': ('3', '^unknown$'),
         }
         for rid, (level, match) in expected.items():
             r = rules[rid]
             assert r.get('level') == level
-            assert r.find('if_sid').text == '100200'
+            assert r.find('if_sid').text == '100500'
             field = r.find('field')
             assert field.get('type') == 'pcre2' and field.text == match
 
     def test_critical_escalation(self):
-        r = _rules('whisper_rules.xml')['100205']
+        r = _rules('whisper_rules.xml')['100505']
         assert r.get('level') == '14'
-        assert r.find('if_sid').text == '100201'  # chains off known_bad
+        assert r.find('if_sid').text == '100501'  # chains off known_bad
         assert r.find('field').get('name') == 'whisper.level'
         assert r.find('field').text == '^CRITICAL$'
 
