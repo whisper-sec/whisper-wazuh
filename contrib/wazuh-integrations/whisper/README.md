@@ -222,6 +222,8 @@ shows `skip reason=non-global`, and no alert is produced.
   <https://github.com/whisper-sec/whisper-wazuh> (full documentation, installers, and the keyed
   agent-activity tier).
 * **Adapted by:** Whisper Security.
+* **Licence:** this copy is contributed under this repository's licence (AGPL-3.0), like every other
+  integration here. The upstream project is MIT-licensed.
 * **Tested versions:** Wazuh **4.14.5**; the Whisper graph API (`graph.whisper.online`).
 * **Maintainer:** Whisper Security (`security@whisper.security`).
 * **Support boundary:** **Vendor-maintained**, best-effort via the upstream repository's issues;

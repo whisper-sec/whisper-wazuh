@@ -4,7 +4,7 @@
 # execs whisper-investigate.py with the analyst's argv intact.
 # Install target: /var/ossec/integrations/whisper-investigate (750 root:wazuh).
 #
-# Copyright (C) whisper.security — MIT
+# Copyright (C) whisper.security. Licensed under the terms in the repository's LICENSE file.
 
 WPYTHON_BIN="framework/python/bin/python3"
 
