@@ -5,7 +5,7 @@ import json
 
 def _cfg(wl, tmp_path, **over):
     cfg = {
-        'api_url': 'https://graph.whisper.security',
+        'api_url': 'https://graph.whisper.online',
         'api_key': 'k',
         'timeout': 10,
         'retries': 3,

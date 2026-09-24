@@ -224,3 +224,14 @@ def write_alert(tmp_path):
         return str(path)
 
     return _write
+
+
+@pytest.fixture(autouse=True)
+def _reset_invocation_deadline():
+    """custom-whisper's per-invocation deadline is a module global that main() stamps. main()
+    resets it in a finally, but a test that sets it directly (or a crash mid-test) must never
+    leak a stale stamp into the next test as a spurious 'deadline exceeded before request'."""
+    yield
+    module = sys.modules.get('whisper_integration')
+    if module is not None and hasattr(module, '_INVOCATION_DEADLINE'):
+        module._INVOCATION_DEADLINE = None

@@ -41,9 +41,43 @@ class TestHttpClient:
     def test_429_honours_retry_after(self, wc, monkeypatch):
         sleeps = []
         ok = json.dumps({'rows': []}).encode()
-        self._client(wc, monkeypatch, [(429, b'', {'retry-after': '7'}), (200, ok, {})], sleeps)
+        self._client(wc, monkeypatch, [(429, b'', {'retry-after': '3'}), (200, ok, {})], sleeps)
         assert wc.execute_query('u', 'k', 'RETURN 1') == []
-        assert sleeps == [7.0]
+        assert sleeps == [3.0]  # under the cap → honoured as-is
+
+    def test_retry_after_is_capped_for_a_synchronous_callout(self, wc, monkeypatch):
+        """A server asking for a 60s pause must not stall integratord for 60s: clamp to BACKOFF_CAP."""
+        sleeps = []
+        ok = json.dumps({'rows': []}).encode()
+        self._client(wc, monkeypatch, [(429, b'', {'retry-after': '60'}), (200, ok, {})], sleeps)
+        assert wc.execute_query('u', 'k', 'RETURN 1') == []
+        assert sleeps == [wc.BACKOFF_CAP] and wc.BACKOFF_CAP <= 5.0
+
+    def test_deadline_already_passed_makes_no_request(self, wc, monkeypatch):
+        calls = []
+        monkeypatch.setattr(wc, '_http_post', lambda *a, **k: calls.append(a) or (200, b'{}', {}))
+        with pytest.raises(wc.WhisperTransportError, match='deadline'):
+            wc.execute_query('u', 'k', 'RETURN 1', deadline=wc.time.monotonic() - 1)
+        assert calls == []  # never starts a request it cannot finish in budget
+
+    def test_backoff_never_sleeps_past_the_deadline(self, wc, monkeypatch):
+        """Retry #1 backs off 0.5s (fits the 0.8s budget); retry #2 would sleep 1.0s past it → fail now."""
+        sleeps = []
+        self._client(wc, monkeypatch, [(500, b'', {})] * 4, sleeps)
+        with pytest.raises(wc.WhisperTransportError, match='deadline'):
+            wc.execute_query('u', 'k', 'RETURN 1', retries=3, deadline=wc.time.monotonic() + 0.8)
+        assert sleeps == [0.5]  # slept once, then refused to overrun instead of sleeping again
+
+    def test_request_timeout_shrinks_to_remaining_budget(self, wc, monkeypatch):
+        seen = []
+
+        def post(url, body, headers, timeout):
+            seen.append(timeout)
+            return 200, json.dumps({'rows': []}).encode(), {}
+
+        monkeypatch.setattr(wc, '_http_post', post)
+        wc.execute_query('u', 'k', 'RETURN 1', timeout=10, deadline=wc.time.monotonic() + 2.0)
+        assert 0 < seen[0] <= 2.0  # a 10s socket timeout shrunk to what is left of the deadline
 
     def test_other_4xx_is_query_error(self, wc, monkeypatch):
         self._client(wc, monkeypatch, [(400, b'bad cypher', {})])

@@ -126,15 +126,15 @@ def tc_01():
     """Green path — threat IPv4."""
     reset_dedup()
     inject_ip('185.220.101.1')
-    src = poll_alert('185.220.101.1', [{'term': {'rule.id': '100202'}}])
-    need(src is not None, 'no rule-100202 alert within 60s')
+    src = poll_alert('185.220.101.1', [{'term': {'rule.id': '100502'}}])
+    need(src is not None, 'no rule-100502 alert within 60s')
     w = src['data']['whisper']
     need(w['verdict'] == 'suspicious', f"verdict={w['verdict']} (want suspicious)")
     need(int(w['asn']['number']) > 0, 'asn.number not > 0')
     need(w['geo']['country'] == 'DE', f"geo.country={w['geo'].get('country')}")
     need(int(w['threat_feed']['sources_count']) >= 1, 'threat_feed.sources_count < 1')
     need(w['source_ref']['rule_id'] == '5710', f"source_ref.rule_id={w['source_ref'].get('rule_id')}")
-    return f"rule 100202, verdict suspicious, asn {w['asn']['number']}, {int(w['threat_feed']['sources_count'])} feeds"
+    return f"rule 100502, verdict suspicious, asn {w['asn']['number']}, {int(w['threat_feed']['sources_count'])} feeds"
 
 
 def tc_03():
@@ -213,10 +213,10 @@ def tc_09():
 def tc_16():
     """Rules render all five verdicts (wazuh-logtest, fresh from disk)."""
     events = [
-        ('known_bad', 'CRITICAL', '100205'),  # known_bad + CRITICAL escalates to 100205
-        ('suspicious', 'HIGH', '100202'),
-        ('known_good', 'INFO', '100203'),
-        ('unknown', 'NONE', '100204'),
+        ('known_bad', 'CRITICAL', '100505'),  # known_bad + CRITICAL escalates to 100505
+        ('suspicious', 'HIGH', '100502'),
+        ('known_good', 'INFO', '100503'),
+        ('unknown', 'NONE', '100504'),
     ]
     got = []
     for verdict, level, rule in events:
@@ -244,7 +244,7 @@ MANUAL = {
     'TC-06': 'no-data domain — inject_json invalid domain; add on demand',
     'TC-08': 'evidence-based verdict — cross-artifact of TC-01 vs TC-07 (both pass here) + code review',
     'TC-10': 'dedup expiry — needs a short dedup_ttl via <options> + wait (stateful, slow)',
-    'TC-11': 'feedback-loop — verified by absence: TC-01 produces exactly one 10020x alert, no re-invoke',
+    'TC-11': 'feedback-loop — verified by absence: TC-01 produces exactly one 10050x alert, no re-invoke',
     'TC-12': 'bad API key — set an invalid key + restart; expect error class=auth (config, disruptive)',
     'TC-13': 'API unreachable — <options> api_url=https://localhost:1/; expect error class=transport',
     'TC-14': 'degraded scoring — UNIT tier (tests/, explain_unavailable.json fixture)',

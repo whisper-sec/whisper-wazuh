@@ -41,7 +41,7 @@ integratord runs `custom-whisper` on the alert; the connector extracts the globa
 
 ```
 whisper: invoke ioc=185.220.101.1 type=ipv4 dedup_key=ipv4|185.220.101.1|000
-whisper: api url=https://graph.whisper.security ms=137
+whisper: api url=https://graph.whisper.online ms=137
 whisper: emit dedup_key=ipv4|185.220.101.1|000 payload_bytes=1385
 ```
 
@@ -95,7 +95,7 @@ on `data.whisper.prefix_threat.score` works even though `_source` shows the stri
 
 ```json
 {
-  "rule": { "id": "100202", "level": 7, "description": "Whisper: 185.220.101.1 is SUSPICIOUS (HIGH)" },
+  "rule": { "id": "100502", "level": 7, "description": "Whisper: 185.220.101.1 is SUSPICIOUS (HIGH)" },
   "data": {
     "integration": "custom-whisper",
     "whisper": {
