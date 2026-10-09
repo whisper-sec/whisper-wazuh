@@ -5,6 +5,13 @@ All notable changes to whisper-wazuh. The format loosely follows
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-10-09
+
+### Fixed
+
+- Corrected the project's published release status and documentation links, which pointed to an
+  outdated release.
+
 ## [1.2.0] — 2026-09-10
 
 Hardens the enrichment connector after the `wazuh/integrations` maintainer review, moves the rule
@@ -101,7 +108,8 @@ interpreter); bring your own Whisper API key.
   [acceptance criteria](docs/mvp-acceptance-criteria.md), and a captured
   [scenario](docs/scenarios/01-tor-ip-enrichment.md).
 
-[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.0.0
