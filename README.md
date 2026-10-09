@@ -6,17 +6,21 @@ with relationship context from the Whisper infrastructure graph.
 
 ## Status
 
-**Released — v1.0.0.** Milestones 1 (MVP), 2 (Enrichment Expansion), and 3 (Release &
+**Released — [v1.2.1](https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.2.1).**
+Milestones 1 (MVP), 2 (Enrichment Expansion), and 3 (Release &
 Distribution) are complete: a working per-alert connector plus an on-demand investigation CLI,
 verified end-to-end on **Wazuh 4.14.5**, and shipped as a tarball, `.deb`/`.rpm` packages, and a
 one-line installer (see [Install](#install) and the [changelog](CHANGELOG.md)). Since then, an
 opt-in **agent-activity log source** (the keyed tier — `install.sh --logs`) brings a tenant's own
-agent DNS/egress/identity activity into Wazuh.
+agent DNS/egress/identity activity into Wazuh. Listed on
+[whisper.security/open](https://www.whisper.security/open) as:
+"Installed from the GitHub releases. It is not in the Wazuh catalogue yet."
 See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) and
 [issues](https://github.com/whisper-sec/whisper-wazuh/issues) for what's next.
 
 ## Documentation
 
+- [**Wazuh integration overview**](https://www.whisper.security/docs/integrations/wazuh/overview) on whisper.security — the product documentation for this connector.
 - [**Architecture**](docs/architecture.md) — how the whole solution fits together (start here).
 - [**Installation & configuration**](docs/installation.md) — the full admin guide: install methods, the API key, trigger groups, verify, and troubleshooting.
 - [Whisper→Wazuh mapping](docs/whisper-to-wazuh-mapping.md) — the field-by-field mapping, verdict gates, and enrichment envelope.
