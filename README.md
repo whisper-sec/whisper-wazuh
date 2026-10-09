@@ -6,7 +6,7 @@ with relationship context from the Whisper infrastructure graph.
 
 ## Status
 
-**Released — [v1.2.0](https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.2.0).**
+**Released — [v1.2.1](https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.2.1).**
 Milestones 1 (MVP), 2 (Enrichment Expansion), and 3 (Release &
 Distribution) are complete: a working per-alert connector plus an on-demand investigation CLI,
 verified end-to-end on **Wazuh 4.14.5**, and shipped as a tarball, `.deb`/`.rpm` packages, and a
