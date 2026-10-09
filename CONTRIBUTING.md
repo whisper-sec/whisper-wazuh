@@ -1,6 +1,6 @@
 # Contributing to whisper-wazuh
 
-Thanks for contributing! The integration is shipping (v1.0.0) — a per-alert enrichment connector,
+Thanks for contributing! The integration is shipping — a per-alert enrichment connector,
 an on-demand investigation CLI, and the install/release tooling. If you're new here, read
 [docs/architecture.md](docs/architecture.md) for how it all fits together, then skim
 [docs/whisper-to-wazuh-mapping.md](docs/whisper-to-wazuh-mapping.md) for the field-level detail.
