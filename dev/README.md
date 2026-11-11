@@ -200,3 +200,52 @@ No restart is needed after changing the key — the script reads it fresh on the
 Without a valid key the connector reaches the API but gets `403` (anonymous); guards, dedup and
 alert rendering still work. The stock `dev-agent-demo` IOC (`203.0.113.45`) is TEST-NET and the
 connector **deliberately skips it** — use a public IOC to see enrichment.
+
+## Wazuh 5.0 assessment stack
+
+[`wazuh-5-single-node/`](wazuh-5-single-node/) is a **separate**, pinned Wazuh **5.0.0-rc2** stack
+(manager + indexer + dashboard). It exists only to assess whether the bundle works on Wazuh 5.0
+(see [`docs/wazuh-5.md`](../docs/wazuh-5.md)); the supported target stays 4.14.5 above.
+
+**Provenance.** Vendored from [`wazuh/wazuh-docker`](https://github.com/wazuh/wazuh-docker) at tag
+**`v5.0.0-rc2`** (GPLv2, headers kept): `single-node/docker-compose.yml`,
+`tools/utils/deployment/certificates-conf.sh`, `tools/utils/deployment/credentials-conf.sh` and
+`build-docker-images/shared/password-policy.sh` (which `credentials-conf.sh` sources). The cert
+tool (`wazuh-certs-tool.sh`) is downloaded at run time from the pre-release location named in
+upstream's `single-node` deployment doc and is not vendored. `certs-config.yml` is the tracked
+node layout (upstream's step 4, at the same tag); `make dev5-certs` copies it to `config.yml`,
+which the tool rewrites and which is gitignored.
+
+**Local modifications.** None to the vendored files. The helper scripts sit under `tools/` and
+`build-docker-images/` inside `wazuh-5-single-node/` so their upstream relative paths resolve.
+The 5.0 layout differs from 4.x (`config/root-ca/`, `config/wazuh_manager/`, Docker secrets from
+`config/credentials/*.env`, manager under `/var/wazuh-manager`), which is why the existing
+`dev-*` targets are not reused.
+
+**Prerequisites.** `vm.max_map_count >= 262144` (see above; on Docker Desktop re-set it after each
+restart) and about 8 GB for Docker. No `sudo` on any platform: `make dev5-certs` verifies the
+tool's pinned SHA-256 (`WAZUH5_CERTS_TOOL_SHA256` in the `Makefile`) and then runs it only inside a
+throwaway `wazuh/wazuh-manager:5.0.0-rc2` container with `--network none`. A mismatch stops
+before anything runs. On Linux the container runs as root, so the generated files
+(`config/credentials/*.env`, `wazuh-ca/`) are root-owned: reading or deleting them needs root.
+
+**Run.** The two stacks share host ports (1514, 1515, 1517, 55000, 443): stop the 4.14.5 stack first.
+
+```bash
+make dev-down                # stop the 4.14.5 stack (keeps its volumes)
+make dev5-certs              # download the cert tool, issue certs, generate credentials
+make dev5-up                 # start the 5.0 rc2 stack
+make dev5-whisper-install    # run the unchanged install.sh; see docs/wazuh-5.md for the result
+make dev5-reset              # stop and delete the 5.0 stack's volumes
+```
+
+Generated and gitignored, never commit: `config/` (certs and `credentials/*.env`, plaintext
+passwords), `wazuh-ca/` (the root CA private key), `wazuh-certificates/`, `wazuh-certificates-tool.log`,
+`config.yml` and the downloaded `wazuh-certs-tool.sh`. `make dev5-certs` is a no-op while
+`config/root-ca/certs/root-ca.pem` or `wazuh-certificates/` exists; to regenerate, delete those
+paths first.
+
+The manager logs a warning that `remoted.pem` carries no name an agent could dial. That is
+expected: `certs-config.yml` lists only `127.0.0.1` and `wazuh.manager`, which is enough for the
+assessment because no agent is enrolled. To enroll an agent from another host, add that host's
+address to the manager node in `certs-config.yml` and regenerate the certificates.

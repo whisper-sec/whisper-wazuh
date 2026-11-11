@@ -14,7 +14,8 @@ COMPOSE_AGENT := $(COMPOSE) -f $(STACK_DIR)/docker-compose.agent.yml
 .PHONY: help dev-init dev-certs dev-up dev-up-basic dev-down dev-reset dev-restart dev-ps dev-logs \
         dev-agent-up dev-agent-down dev-agent-logs dev-agent-demo \
         dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-demo-enrich dev-acceptance \
-        dev-logs-install dev-logs-smoke
+        dev-logs-install dev-logs-smoke \
+        dev5-certs dev5-up dev5-down dev5-reset dev5-ps dev5-whisper-install
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -135,3 +136,46 @@ dev-logs-smoke: ## Run the log-source poller once and show the spool + decoded a
 	@echo "--- decoded alerts (data.whisper_agent.*) ---"
 	@$(COMPOSE_BASE) exec -T wazuh.manager sh -c "grep -o 'whisper_agent[^,]*' /var/ossec/logs/alerts/alerts.json 2>/dev/null | tail -6" \
 		|| echo "no whisper_agent alerts yet — allow ~1 min for logcollector to tail the spool."
+
+# --- Wazuh 5.0 assessment stack (dev/wazuh-5-single-node/) -------------------------------
+# A separate, pinned 5.0 rc2 stack used to assess compatibility (docs/wazuh-5.md). It shares
+# host ports with the 4.14.5 stack: run `make dev-down` first, never both at once.
+STACK5_DIR     := dev/wazuh-5-single-node
+COMPOSE5       := docker compose -f $(STACK5_DIR)/docker-compose.yml
+WHISPER_SRC5   := /tmp/whisper-src
+# Pre-release cert tool (Wazuh staging host). The SHA-256 is pinned beside the URL and checked
+# before anything runs; a new rc or GA needs a new, reviewed pin.
+WAZUH5_CERTS_TOOL_URL    := https://packages-staging.xdrsiem.wazuh.info/pre-release/5.x/installation-assistant/wazuh-certs-tool-5.0.0-rc2.sh
+WAZUH5_CERTS_TOOL_SHA256 := b75bc38b49ee81e266c3cd5928e45a30fa7cb70a133f7b368d16fbba50bec2f4
+WAZUH5_IMAGE   := wazuh/wazuh-manager:5.0.0-rc2
+# The tool and the helpers run only in a throwaway container with no network, on every platform:
+# no sudo, nothing executes on the host. The checksum is verified first, inside the same container.
+RUN5_TOOL      := docker run --rm --network none --entrypoint bash -v "$$PWD":/work -w /work $(WAZUH5_IMAGE) -c
+
+dev5-certs: ## 5.0 rc2: fetch the SHA-pinned cert tool, issue certs and credentials in a throwaway container (gitignored)
+	@if test -f $(STACK5_DIR)/config/root-ca/certs/root-ca.pem || test -d $(STACK5_DIR)/wazuh-certificates; then \
+		echo "5.0 certs already present (delete config/ wazuh-ca/ wazuh-certificates/ in $(STACK5_DIR) to regenerate)"; \
+	else \
+		set -e; cd $(STACK5_DIR); \
+		curl -fsS -o wazuh-certs-tool.sh $(WAZUH5_CERTS_TOOL_URL); \
+		cp certs-config.yml config.yml; \
+		$(RUN5_TOOL) 'echo "$(WAZUH5_CERTS_TOOL_SHA256)  wazuh-certs-tool.sh" | sha256sum -c - && bash tools/utils/deployment/certificates-conf.sh --cert --copy --priv'; \
+		$(RUN5_TOOL) 'bash tools/utils/deployment/credentials-conf.sh'; \
+	fi
+
+dev5-up: ## 5.0 rc2: start the stack (stop the 4.14.5 stack first)
+	$(COMPOSE5) up -d
+
+dev5-down: ## 5.0 rc2: stop the stack (keep data volumes)
+	$(COMPOSE5) down
+
+dev5-reset: ## 5.0 rc2: stop the stack and delete its data volumes
+	$(COMPOSE5) down -v
+
+dev5-ps: ## 5.0 rc2: show stack status
+	$(COMPOSE5) ps
+
+dev5-whisper-install: ## 5.0 rc2: run the unchanged install.sh against the manager (expected to fail, see docs/wazuh-5.md)
+	$(COMPOSE5) exec -T wazuh.manager mkdir -p $(WHISPER_SRC5)
+	docker cp integrations/whisper/. $$($(COMPOSE5) ps -q wazuh.manager):$(WHISPER_SRC5)/
+	$(COMPOSE5) exec -T wazuh.manager sh $(WHISPER_SRC5)/install.sh --dev --group sshd

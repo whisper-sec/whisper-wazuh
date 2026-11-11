@@ -5,6 +5,18 @@ All notable changes to whisper-wazuh. The format loosely follows
 
 ## [Unreleased]
 
+### Documentation
+
+- Added [`docs/wazuh-5.md`](docs/wazuh-5.md): the assessment of the bundle on Wazuh 5.0.0-rc2 (not
+  compatible; the XML rules, the `<integration>` hook and the 4.x indexer template do not apply)
+  and the README status now says so.
+
+### Development
+
+- `make dev5-*` targets and `dev/wazuh-5-single-node/`: a separate, pinned Wazuh 5.0.0-rc2 dev
+  stack used for that assessment. Its certificates come from Wazuh's cert tool, run in a
+  throwaway container after a pinned SHA-256 check.
+
 ## [1.2.1] — 2026-10-09
 
 ### Fixed
