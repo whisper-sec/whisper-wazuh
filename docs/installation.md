@@ -15,7 +15,7 @@ The integration runs entirely on the manager — you don't touch your agents.
 
 | | | why |
 |---|---|---|
-| A **Wazuh manager, 4.x** (single-node or cluster) | as **root** | it edits `ossec.conf`, drops files into `/var/ossec`, and restarts the manager |
+| A **Wazuh manager, 4.x** (single-node or cluster; 5.0 is not supported, see [wazuh-5.md](wazuh-5.md)) | as **root** | it edits `ossec.conf`, drops files into `/var/ossec`, and restarts the manager |
 | The manager's **bundled Python 3.10** | already there | the connector is stdlib-only — nothing to `pip install` |
 | **TLS egress** to `graph.whisper.online` | from the manager | the enrichment API. For the on-demand CLI, also `mcp.whisper.security` |
 | Your **indexer reachable** from the install host | default `https://localhost:9200`, user `admin` | the installer pushes a field-type template there first |
