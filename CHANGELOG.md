@@ -5,6 +5,16 @@ All notable changes to whisper-wazuh. The format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The enrichment connector now reads the engine's `coverage` from `explain()` and carries it
+  in `data.whisper.coverage.data_coverage`. An indicator the engine did not assess (level
+  `UNKNOWN` or coverage `no-data`) no longer derives `known_good` from an allowlist or trust
+  signal: it derives `unknown` (rule 100504) unless a hard-bad flag or threat evidence applies.
+  The default endpoint returns `coverage`. An endpoint that does not rejects the new query, and
+  the connector then falls back to its reduced query, which carries no score, level or feed
+  data.
+
 ### Documentation
 
 - Added [`docs/wazuh-5.md`](docs/wazuh-5.md): the assessment of the bundle on Wazuh 5.0.0-rc2 (not
