@@ -1,7 +1,7 @@
 # Wazuh 5.0 compatibility
 
 **Status (Wazuh 5.0.0-rc2, observed 2026-11-11): not compatible.** On a 5.0.0-rc2 manager the
-current bundle (v1.2.1) enriches nothing: the installer refuses to run, the XML rules are not
+bundle (tested at v1.2.1; v1.2.2 changes nothing here) enriches nothing: the installer refuses to run, the XML rules are not
 loaded, and the manager's configuration schema rejects the `<integration>` hook the connector is
 triggered from. Nothing here is a GA result; the claims are scoped to the tag below and need
 re-checking when 5.0 is released. **Today, stay on Wazuh 4.x**: the 4.x line is still maintained
