@@ -300,7 +300,7 @@ Indexed, this becomes `data.integration = "custom-whisper"`, `data.whisper.verdi
 `data.whisper.threat_feed.feeds = [...]`, etc.
 
 > **No `null` anywhere:** nullable fields (`advisory`, `asn.name` — AS60729 has no `HAS_NAME` —
-> `geo.city`, `unmapped_summary`, `coverage.shared_host`/`data_coverage`) are **omitted** when
+> `geo.city`, `unmapped_summary`, `coverage.shared_host`, and `coverage.data_coverage` when the engine returns none) are **omitted** when
 > unknown, never sent as JSON `null`: analysisd stringifies `null` into the literal keyword
 > `"null"` (§2.4, verified live). Empty *lists* are kept.
 
@@ -324,12 +324,12 @@ fields locked in issue #1 §3.7; the rest are additions this spec introduces and
 | `known` | boolean | Whisper has a real graph **node** for this IOC. Determined by an anchored `MATCH` (or a feed listing, which implies a node) — **not** by `explain().found`, which returns `true` for any well-formed domain even with no node (verified 2026-07-06). Distinct from `verdict`: "known" = *the graph knows it*, not *it is safe*. |
 | `verdict` | keyword | `known_good` \| `known_bad` \| `suspicious` \| `unknown` — **evidence-derived** (§6). Never a raw copy of the Whisper score. |
 | `risk_score` | float | Whisper `explain().score` (unbounded float, typ. 0–100+). **Evidence surfaced, never the sole verdict.** Emit consistently as a number (see §2.4 type rule). |
-| `level` | keyword | Whisper `explain().level` enum (`NONE` \| `INFO` \| `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL`), verbatim. `INFO` is a real value (e.g. `8.8.8.8`) — the verdict gates treat it as no-severity (evidence must come from a category/flag). |
+| `level` | keyword | Whisper `explain().level` enum (`UNKNOWN` \| `NONE` \| `INFO` \| `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL`), verbatim. `INFO` is a real value (e.g. `8.8.8.8`) — the verdict gates treat it as no-severity (evidence must come from a category/flag). `UNKNOWN` means the engine did not assess the indicator; it never derives `known_good` (§6). |
 | `available` | boolean | Whisper `explain().available` — the scoring backend answered. `false` (degraded / `retryAfter`) forces `verdict = unknown` (§6, §11). |
 | `advisory` | keyword *(omitted when unknown)* | The **top-level** `explain()` advisory (e.g. `allowlist-vouched`) — **not** a `coverage` sub-field. Signals an allowlist vouch that downgrades an otherwise-listed IP. **Never `null`** — nullable fields are stripped before send (§2.4). |
 | `permalink` | keyword | Deep link to the Whisper graph view for the IOC. |
 | `graph_node_id` | keyword | Stable Whisper node id (e.g. `ipv4/185.220.101.1`). |
-| `coverage` | object | `granularity` ← IOC type (always present). `shared_host` / `data_coverage` are MCP-surface-only signals unavailable at the REST layer — **omitted** (never `null`), so `coverage` is typically just `{granularity}`. |
+| `coverage` | object | `granularity` ← IOC type (always present). `data_coverage` ← the scalar `explain().coverage` string (e.g. `no-data`, `known-clean`, `ambiguous`, `not-applicable`), omitted when absent; a non-string value is dropped with an `unmapped_summary` note (§8). It lives in this sub-field because `coverage` itself is an object in the indexer template. `shared_host` is not available at the REST layer and is **omitted** (never `null`). |
 | `source_ref` | object | Linkage back to the triggering alert: `rule_id`, `alert_id`, `agent_id`, `field_path` (the `SUPPORTED_FIELD_PATHS` entry that produced the IOC, recorded in `data.`-prefixed form, e.g. `data.srcip`), `original_full_log` (truncated). |
 | `dedup_key` | keyword | The idempotency key that suppressed/allowed this alert (§7). |
 | `unmapped_summary` | text *(omitted when nothing was dropped)* | One-line summary of Whisper data the connector saw but did **not** map (no silent drops, §8). Absent — not `null` — when there is nothing to report (§2.4). |
@@ -540,7 +540,7 @@ e.g. `level: HIGH` with explanation "Informational").
 | Condition (evaluated in order — first match wins) | `verdict` |
 |---|---|
 | `available == false` **or** `explain().found == false` | `unknown` |
-| a positive trust signal (Popularity/Trust feeds only, `advisory == "allowlist-vouched"`, or `node.isWhitelist`) **AND** no confirmed-bad/threat evidence **AND** `level ∉ {HIGH, CRITICAL}` | `known_good` |
+| a positive trust signal (Popularity/Trust feeds only, `advisory == "allowlist-vouched"`, or `node.isWhitelist`) **AND** no confirmed-bad/threat evidence **AND** `level ∉ {HIGH, CRITICAL}` **AND** the engine assessed it (`level != UNKNOWN` and `coverage != no-data`, **#64**) | `known_good` |
 | a **confirmed-malicious node flag** (`isC2`, `isMalware`, `isPhishing`, `isBotnet`, `isExfilDestination`, `isOfacSanctioned`, `isStateActor`) — the node IS bad infrastructure (**#30**) — **OR** `level ∈ {HIGH, CRITICAL}` **and** ≥1 confirmed-bad feed category (C2, Malware, Phishing, Brute Force, Attack Sources, …) | `known_bad` |
 | `level ∈ {LOW, MEDIUM, HIGH, CRITICAL}`, or any threat category / weak bad node-flag short of confirmed-bad (`isThreat`, `isSpam`, `isBlacklist`, `isBruteforce`, `isScanner`, `isDga`, Tor/proxy/VPN context) | `suspicious` |
 | found, but only trust/neutral/no evidence and no score band | `unknown` |
@@ -550,10 +550,11 @@ e.g. `level: HIGH` with explanation "Informational").
 > + a phishing listing) correctly derives `known_bad`, not `known_good`.
 >
 > **Coverage gate — implementation limitation.** The §4.1 envelope defines
-> `coverage.{granularity, shared_host, data_coverage}`, but the **REST `explain()` surface exposes
-> no coverage block** (verified 2026-07-06 — it is an MCP-surface-only field), so `shared_host`
-> and `data_coverage` are **omitted** (stripped with all nulls, §2.4) and **cannot gate the
-> verdict**. The gate order above
+> `coverage.{granularity, shared_host, data_coverage}`. The REST `explain()` yields a scalar
+> `coverage` string, which fills `data_coverage` (#64); a row with `level UNKNOWN` or coverage
+> `no-data` is never `known_good` and falls through to `known_bad` (hard-bad flag), `suspicious`
+> (threat evidence) or `unknown`. `shared_host` is **not** available at REST (omitted, §2.4) and
+> **cannot gate the verdict**. The gate order above
 > is otherwise conservative (any threat signal blocks `known_good`); the one residual case is a
 > multi-tenant apex listed *only* in trust feeds, which derives `known_good` where a coverage
 > signal would have said `unknown`. Tracked as a post-MVP refinement (a `whisper.assess`
@@ -825,8 +826,8 @@ are settled type/noise-policy calls or items deferred post-MVP, noted inline on 
 5. ~~**Feed polarity map.**~~ **Resolved (#14, 2026-07-06):** a static `feedId → category` map
    (43 feeds from the live graph) + prefix fallback for per-variant slugs ships in the connector
    (`FEED_CATEGORIES`), with trust / confirmed-bad / suspicious category sets driving §6.
-   *(New residual, promoted from the §6 coverage note): the REST `explain()` has no coverage block,
-   so a multi-tenant apex listed only in trust feeds can derive `known_good`; a post-MVP
+   *(New residual, promoted from the §6 coverage note): the REST `explain()` has no `shared_host`
+   signal (its scalar `coverage` only gates `no-data`, #64), so a multi-tenant apex listed only in trust feeds can derive `known_good`; a post-MVP
    `whisper.assess` `host_class` probe would restore the shared-host gate.)*
 6. **`owner` / `business_unit` (IP).** Issue #1 §3.5 lists these, but there is **no Whisper graph
    source** for them — they are asset-inventory (Wazuh-side) data. Either wire them from an asset
@@ -1034,6 +1035,10 @@ it resolves at runtime only.
 
 ## Change log / provenance
 
+- **v1.10 (2026-11-12):** #64 — `explain()` now YIELDs `coverage`; the connector carries it in
+  `data.whisper.coverage.data_coverage` (§4.2). `level` gains `UNKNOWN`. The §6 `known_good`
+  gate excludes `level == UNKNOWN` and coverage `no-data`; the limitation note narrows to
+  `shared_host` only.
 - **v1.9 (2026-09-09):** upstream review of the `wazuh/integrations` submission. Rule IDs moved
   `100200`–`100249` → `100500`–`100549` (a `+300` shift; the old band collided with three merged
   integrations and with Wazuh's own custom-rules default), and a per-invocation wall-clock

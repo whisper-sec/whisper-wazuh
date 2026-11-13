@@ -1,0 +1,66 @@
+# Finding enricher overlay (issue #67 spike): option (b), a poller on the indexer API instead of
+# the <integration> hook. Dev-only. Use it with the base and the agent overlay (`make dev5-spike-*`).
+# Needs Python 3.10+. The rc2 manager image bundles a Python 3.12 for its API, but the poller runs in
+# its own container so the spike changes nothing in the manager and holds only its own credential.
+#
+#   whisper.enricher        long-running poller; sees only its own least-privilege credential
+#   whisper.enricher-setup  one-shot (profile `setup`): creates the index template, index, role,
+#                           user and mapping with the indexer admin credential, and writes the
+#                           enricher's generated password under config/whisper-enricher/
+#
+# The poller mounts the connector (integrations/whisper) and the spike code read-only. python:3.11-slim
+# is pinned by the digest it resolved to on 2026-11-12. No host ports are published.
+x-enricher-common: &enricher-common
+  image: python:3.11-slim@sha256:a5b427ace4900267d93db34138e512325c6fa6af84ad5e4ed5f3b36258cc4142
+  entrypoint: ["python3", "/opt/spike/finding_enricher.py"]
+  environment:
+    - PYTHONDONTWRITEBYTECODE=1
+    - PYTHONUNBUFFERED=1
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp
+
+services:
+  whisper.enricher:
+    <<: *enricher-common
+    container_name: single-node-whisper.enricher
+    restart: unless-stopped
+    command: ["run", "--interval", "30"]
+    read_only: true
+    cap_drop:
+      - ALL
+    volumes:
+      - ../../integrations/whisper:/opt/whisper:ro
+      - ../wazuh-5-spike:/opt/spike:ro
+      - ./config/root-ca/certs/root-ca.pem:/certs/root-ca.pem:ro
+    depends_on:
+      wazuh.indexer:
+        condition: service_healthy
+    secrets:
+      - source: whisper_enricher_credentials
+        target: whisper-enricher-credentials
+
+  whisper.enricher-setup:
+    <<: *enricher-common
+    profiles: ["setup"]
+    command: ["setup"]
+    read_only: true
+    cap_drop: [ALL]
+    # Root needs these two to create enricher.env in the host-owned /out
+    # directory on Linux; nothing else is granted.
+    cap_add: [DAC_OVERRIDE, FOWNER]
+    depends_on:
+      wazuh.indexer:
+        condition: service_healthy
+    secrets:
+      - source: indexer_credentials
+        target: wazuh-credentials
+    volumes:
+      - ../wazuh-5-spike:/opt/spike:ro
+      - ./config/root-ca/certs/root-ca.pem:/certs/root-ca.pem:ro
+      - ./config/whisper-enricher:/out
+
+secrets:
+  whisper_enricher_credentials:
+    file: ./config/whisper-enricher/enricher.env

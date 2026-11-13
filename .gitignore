@@ -39,3 +39,10 @@ config.yml
 
 # --- Wazuh dev stack: generated TLS certs (regenerate locally, never commit) ---
 dev/wazuh-single-node/config/certs/
+
+# --- Wazuh 5.0 assessment stack: generated certs, credentials (passwords) and the downloaded cert tool ---
+dev/wazuh-5-single-node/config/
+dev/wazuh-5-single-node/wazuh-certs-tool*.sh
+dev/wazuh-5-single-node/wazuh-certificates/
+dev/wazuh-5-single-node/wazuh-ca/
+dev/wazuh-5-single-node/wazuh-certificates-tool.log

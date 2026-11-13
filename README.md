@@ -6,7 +6,7 @@ with relationship context from the Whisper infrastructure graph.
 
 ## Status
 
-**Released — [v1.2.1](https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.2.1).**
+**Released — [v1.2.2](https://github.com/whisper-sec/whisper-wazuh/releases/tag/v1.2.2).**
 Milestones 1 (MVP), 2 (Enrichment Expansion), and 3 (Release &
 Distribution) are complete: a working per-alert connector plus an on-demand investigation CLI,
 verified end-to-end on **Wazuh 4.14.5**, and shipped as a tarball, `.deb`/`.rpm` packages, and a
@@ -15,6 +15,8 @@ opt-in **agent-activity log source** (the keyed tier — `install.sh --logs`) br
 agent DNS/egress/identity activity into Wazuh. Listed on
 [whisper.security/open](https://www.whisper.security/open) as:
 "Installed from the GitHub releases. It is not in the Wazuh catalogue yet."
+Wazuh 5.0 (rc2) is not supported yet: the XML rules and the `<integration>` hook are not
+available on it, so stay on 4.x for now (see [Wazuh 5.0 compatibility](docs/wazuh-5.md)).
 See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) and
 [issues](https://github.com/whisper-sec/whisper-wazuh/issues) for what's next.
 
@@ -23,6 +25,7 @@ See the [milestones](https://github.com/whisper-sec/whisper-wazuh/milestones) an
 - [**Wazuh integration overview**](https://www.whisper.security/docs/integrations/wazuh/overview) on whisper.security — the product documentation for this connector.
 - [**Architecture**](docs/architecture.md) — how the whole solution fits together (start here).
 - [**Installation & configuration**](docs/installation.md) — the full admin guide: install methods, the API key, trigger groups, verify, and troubleshooting.
+- [Wazuh 5.0 compatibility](docs/wazuh-5.md) — what happens on a 5.0 rc2 manager, and what is open.
 - [Whisper→Wazuh mapping](docs/whisper-to-wazuh-mapping.md) — the field-by-field mapping, verdict gates, and enrichment envelope.
 - [MVP acceptance criteria](docs/mvp-acceptance-criteria.md) — the TC-01..TC-22 test matrix and definition of done.
 

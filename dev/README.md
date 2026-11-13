@@ -200,3 +200,98 @@ No restart is needed after changing the key — the script reads it fresh on the
 Without a valid key the connector reaches the API but gets `403` (anonymous); guards, dedup and
 alert rendering still work. The stock `dev-agent-demo` IOC (`203.0.113.45`) is TEST-NET and the
 connector **deliberately skips it** — use a public IOC to see enrichment.
+
+## Wazuh 5.0 assessment stack
+
+[`wazuh-5-single-node/`](wazuh-5-single-node/) is a **separate**, pinned Wazuh **5.0.0-rc2** stack
+(manager + indexer + dashboard). It exists only to assess whether the bundle works on Wazuh 5.0
+(see [`docs/wazuh-5.md`](../docs/wazuh-5.md)); the supported target stays 4.14.5 above.
+
+**Provenance.** Vendored from [`wazuh/wazuh-docker`](https://github.com/wazuh/wazuh-docker) at tag
+**`v5.0.0-rc2`** (GPLv2, headers kept): `single-node/docker-compose.yml`,
+`tools/utils/deployment/certificates-conf.sh`, `tools/utils/deployment/credentials-conf.sh` and
+`build-docker-images/shared/password-policy.sh` (which `credentials-conf.sh` sources). The cert
+tool (`wazuh-certs-tool.sh`) is downloaded at run time from the pre-release location named in
+upstream's `single-node` deployment doc and is not vendored. `certs-config.yml` is the tracked
+node layout (upstream's step 4, at the same tag); `make dev5-certs` copies it to `config.yml`,
+which the tool rewrites and which is gitignored.
+
+**Local modifications.** None to the vendored files. The helper scripts sit under `tools/` and
+`build-docker-images/` inside `wazuh-5-single-node/` so their upstream relative paths resolve.
+The 5.0 layout differs from 4.x (`config/root-ca/`, `config/wazuh_manager/`, Docker secrets from
+`config/credentials/*.env`, manager under `/var/wazuh-manager`), which is why the existing
+`dev-*` targets are not reused.
+
+**Prerequisites.** `vm.max_map_count >= 262144` (see above; on Docker Desktop re-set it after each
+restart) and about 8 GB for Docker. No `sudo` on any platform: `make dev5-certs` verifies the
+tool's pinned SHA-256 (`WAZUH5_CERTS_TOOL_SHA256` in the `Makefile`) and then runs it only inside a
+throwaway `wazuh/wazuh-manager:5.0.0-rc2` container with `--network none`. A mismatch stops
+before anything runs. On Linux the container runs as root, so the generated files
+(`config/credentials/*.env`, `wazuh-ca/`) are root-owned: reading or deleting them needs root.
+
+**Run.** The two stacks share host ports (1514, 1515, 1517, 55000, 443): stop the 4.14.5 stack first.
+
+```bash
+make dev-down                # stop the 4.14.5 stack (keeps its volumes)
+make dev5-certs              # download the cert tool, issue certs, generate credentials
+make dev5-up                 # start the 5.0 rc2 stack
+make dev5-whisper-install    # run the unchanged install.sh; see docs/wazuh-5.md for the result
+make dev5-reset              # stop and delete the 5.0 stack's volumes
+```
+
+Generated and gitignored, never commit: `config/` (certs and `credentials/*.env`, plaintext
+passwords), `wazuh-ca/` (the root CA private key), `wazuh-certificates/`, `wazuh-certificates-tool.log`,
+`config.yml` and the downloaded `wazuh-certs-tool.sh`. `make dev5-certs` is a no-op while
+`config/root-ca/certs/root-ca.pem` or `wazuh-certificates/` exists; to regenerate, delete those
+paths first.
+
+The manager logs a warning that `remoted.pem` carries no name an agent could dial. That is
+expected on a stack with no agent. `certs-config.yml` lists `127.0.0.1` and `wazuh.manager`, and
+`wazuh.manager` is what the spike agent below dials over the compose network (enrolment worked
+with no certificate change on 2026-11-12). To enroll an agent from another host, add that host's
+address to the manager node in `certs-config.yml` and regenerate the certificates.
+
+### Spike: a hook-free enrichment path (option (b), issue #67)
+
+An optional pair of overlays adds an enrolled 5.0.0-rc2 agent and a finding enricher to the 5.0
+stack. They exist to test whether Whisper enrichment can run on 5.0 without the `<integration>`
+hook (see [`docs/wazuh-5.md`](../docs/wazuh-5.md#option-b-spike)). Nothing here ships and the
+shipped bundle is unchanged.
+
+```bash
+make dev5-agent-up               # mint an enrollment token on the manager API, start the agent
+make dev5-agent-demo             # append an sshd pre-auth close from 185.220.101.1 (IOC=<ip> to change)
+make dev5-spike-setup            # enrichment template, index, least-privilege role and user
+make dev5-spike-up               # start the poller (polls wazuh-findings-v5-* every 30 s)
+make dev5-spike-query FINDING=<finding _id>
+make dev5-agent-down             # remove the agent container (dev5-down and dev5-reset stop everything)
+```
+
+The finding appears about 2 minutes after the log line (the detector runs on a schedule) and the
+enrichment within one poll after that. The files:
+
+- [`wazuh-5-single-node/docker-compose.agent.yml`](wazuh-5-single-node/docker-compose.agent.yml):
+  the `wazuh/wazuh-agent:5.0.0-rc2` pre-release image, pinned by digest. It mounts no config: the
+  stock agent config already tails `/var/ossec/logs/active-responses.log`, where the demo target
+  appends.
+- [`wazuh-5-single-node/docker-compose.spike.yml`](wazuh-5-single-node/docker-compose.spike.yml):
+  `python:3.11-slim` (pinned by digest) running
+  [`wazuh-5-spike/finding_enricher.py`](wazuh-5-spike/finding_enricher.py), which loads the
+  connector read-only. No host ports.
+
+The enricher reads these optional environment overrides: `WHISPER_SPIKE_INDEXER_URL`,
+`WHISPER_SPIKE_CA`, `WHISPER_SPIKE_ADMIN_CREDENTIALS`, `WHISPER_SPIKE_OUT_DIR`,
+`WHISPER_SPIKE_CREDENTIALS`, `WHISPER_SPIKE_CONNECTOR_DIR`, `WHISPER_SPIKE_STATE_DIR` and
+`WHISPER_API_URL`. The compose overlay sets the paths; none of them holds a secret value.
+
+**The enrollment token is a credential.** `make dev5-agent-up` authenticates to the manager API
+with the credential from `config/credentials/manager.env` (through curl's stdin config, not argv),
+mints a one-use token that expires after 10 minutes and hands it to `docker compose up` through
+the environment of that one recipe. It is never echoed or put on a command line. Docker keeps it
+in the agent container's config until `make dev5-agent-down` removes the container. The agent's `/var/ossec/etc` lives in the
+`wazuh_agent_etc` volume; `make dev5-reset` deletes it.
+
+Generated and gitignored, never commit: `config/whisper-enricher/enricher.env` (the enricher
+user's generated password, `0600`). `make dev5-spike-setup` runs one throwaway container that reads
+the indexer admin credential from Docker secrets, creates the role and user, and writes that file;
+the long-running poller sees only its own credential. On Linux the generated file is root-owned.

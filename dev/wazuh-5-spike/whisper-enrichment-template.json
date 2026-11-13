@@ -1,0 +1,218 @@
+{
+  "index_patterns": [
+    "whisper-enrichment-v5*"
+  ],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": {
+              "type": "keyword",
+              "ignore_above": 1024
+            }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "finding": {
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "index": {
+              "type": "keyword"
+            },
+            "timestamp": {
+              "type": "date"
+            },
+            "rule": {
+              "properties": {
+                "id": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "agent": {
+              "properties": {
+                "id": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        },
+        "ioc": {
+          "type": "keyword"
+        },
+        "ioc_type": {
+          "type": "keyword"
+        },
+        "field_path": {
+          "type": "keyword"
+        },
+        "whisper": {
+          "properties": {
+            "risk_score": {
+              "type": "float",
+              "ignore_malformed": true
+            },
+            "known": {
+              "type": "boolean"
+            },
+            "available": {
+              "type": "boolean"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "coverage": {
+              "properties": {
+                "shared_host": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "asn": {
+              "properties": {
+                "number": {
+                  "type": "long",
+                  "ignore_malformed": true
+                },
+                "reputation": {
+                  "properties": {
+                    "threatDensityScore": {
+                      "type": "float",
+                      "ignore_malformed": true
+                    },
+                    "graphMetricsScore": {
+                      "type": "float",
+                      "ignore_malformed": true
+                    },
+                    "historicalScore": {
+                      "type": "float",
+                      "ignore_malformed": true
+                    },
+                    "prefixAgeScore": {
+                      "type": "float",
+                      "ignore_malformed": true
+                    }
+                  }
+                }
+              }
+            },
+            "prefix_threat": {
+              "properties": {
+                "score": {
+                  "type": "float",
+                  "ignore_malformed": true
+                },
+                "is_threat": {
+                  "type": "boolean"
+                },
+                "threat_neighbor_count": {
+                  "type": "long",
+                  "ignore_malformed": true
+                }
+              }
+            },
+            "tls": {
+              "properties": {
+                "cluster_size": {
+                  "type": "long",
+                  "ignore_malformed": true
+                },
+                "count": {
+                  "type": "long",
+                  "ignore_malformed": true
+                }
+              }
+            },
+            "threat_feed": {
+              "properties": {
+                "sources_count": {
+                  "type": "long",
+                  "ignore_malformed": true
+                },
+                "first_seen": {
+                  "type": "date",
+                  "ignore_malformed": true
+                },
+                "last_seen": {
+                  "type": "date",
+                  "ignore_malformed": true
+                }
+              }
+            },
+            "links": {
+              "properties": {
+                "inbound_total": {
+                  "type": "long",
+                  "ignore_malformed": true
+                },
+                "outbound_total": {
+                  "type": "long",
+                  "ignore_malformed": true
+                },
+                "suspicious_count": {
+                  "type": "long",
+                  "ignore_malformed": true
+                }
+              }
+            },
+            "variants": {
+              "properties": {
+                "confidence": {
+                  "type": "float",
+                  "ignore_malformed": true
+                }
+              }
+            },
+            "verdict": {
+              "type": "keyword"
+            },
+            "level": {
+              "type": "keyword"
+            },
+            "type": {
+              "type": "keyword"
+            },
+            "ioc": {
+              "type": "keyword"
+            },
+            "permalink": {
+              "type": "keyword"
+            },
+            "dedup_key": {
+              "type": "keyword"
+            },
+            "tags": {
+              "type": "keyword"
+            },
+            "unmapped_summary": {
+              "type": "keyword",
+              "ignore_above": 1024
+            },
+            "schema_version": {
+              "type": "keyword"
+            },
+            "graph_node_id": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  }
+}

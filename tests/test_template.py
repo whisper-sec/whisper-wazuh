@@ -108,7 +108,16 @@ class TestStripNulls:
         """End-to-end guard: nothing enrich() returns may contain a None anywhere."""
         router.add(
             'CALL explain',
-            [{'available': True, 'found': True, 'sources': [], 'advisory': None, 'score': None}],
+            [
+                {
+                    'available': True,
+                    'found': True,
+                    'sources': [],
+                    'advisory': None,
+                    'score': None,
+                    'coverage': None,
+                }
+            ],
         )
         router.add('RETURN n.isThreat', [{'isThreat': False, 'isTor': None}])
         router.add(

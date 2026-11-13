@@ -89,6 +89,19 @@ class TestCallExplain:
         row = wi.call_explain({'api_url': 'u', 'api_key': 'k', 'timeout': 10, 'retries': 3}, 'x')
         assert row['available'] is False and row['retryAfter'] == 60
 
+    def test_rich_shape_yields_coverage(self, wi, monkeypatch):
+        """#64: the rich YIELD asks for `coverage` and the row comes back with it."""
+        calls = []
+
+        def fake_eq(api_url, api_key, cypher, params=None, timeout=10, retries=3):
+            calls.append(cypher)
+            return [{'available': True, 'coverage': 'no-data'}]
+
+        monkeypatch.setattr(wi, 'execute_query', fake_eq)
+        row = wi.call_explain({'api_url': 'u', 'api_key': 'k', 'timeout': 10, 'retries': 3}, 'x')
+        assert 'coverage' in calls[0].split('RETURN')[0]
+        assert row['coverage'] == 'no-data'
+
 
 class TestFragmentDegradation:
     def test_aux_query_failure_keeps_verdict(self, wi, router):
@@ -293,6 +306,51 @@ class TestVerdictDerivation:
         row = {'available': True, 'found': True, 'level': 'NONE', 'sources': [{'feedId': 'spamhaus-drop'}]}
         assert wi.derive_verdict(row, {}) == 'suspicious'
 
+    @pytest.mark.parametrize(
+        'row, flags',
+        [
+            ({'advisory': 'allowlist-vouched', 'sources': []}, {}),
+            ({'sources': []}, {'isWhitelist': True}),
+            ({'sources': [{'feedId': 'tranco-top1m'}]}, {}),
+        ],
+    )
+    def test_unknown_level_never_known_good(self, wi, row, flags):
+        """#64: an unassessed IOC (level UNKNOWN) is unknown even with a trust signal."""
+        row = {'available': True, 'found': False, 'level': 'UNKNOWN', **row}
+        assert wi.derive_verdict(row, flags) == 'unknown'
+
+    def test_no_data_coverage_never_known_good(self, wi):
+        row = {
+            'available': True,
+            'found': True,
+            'level': 'NONE',
+            'coverage': 'no-data',
+            'advisory': 'allowlist-vouched',
+        }
+        assert wi.derive_verdict(row, {}) == 'unknown'
+
+    def test_no_data_coverage_case_and_level_case_insensitive(self, wi):
+        base = {'available': True, 'found': True, 'advisory': 'allowlist-vouched'}
+        assert wi.derive_verdict({**base, 'level': 'NONE', 'coverage': ' No-Data '}, {}) == 'unknown'
+        assert wi.derive_verdict({**base, 'level': 'unknown'}, {}) == 'unknown'
+
+    def test_other_coverage_values_do_not_block_known_good(self, wi):
+        row = {**GOOGLE_DNS_EXPLAIN, 'coverage': 'known-clean'}
+        assert wi.derive_verdict(row, {}) == 'known_good'
+
+    def test_unknown_level_with_hard_bad_flag_is_known_bad(self, wi):
+        row = {'available': True, 'found': True, 'level': 'UNKNOWN', 'coverage': 'no-data', 'sources': []}
+        assert wi.derive_verdict(row, {'isC2': True, 'isWhitelist': True}) == 'known_bad'
+
+    def test_unknown_level_with_threat_category_is_suspicious(self, wi):
+        row = {
+            'available': True,
+            'found': True,
+            'level': 'UNKNOWN',
+            'sources': [{'feedId': 'spamhaus-drop'}, {'feedId': 'tranco-top1m'}],
+        }
+        assert wi.derive_verdict(row, {}) == 'suspicious'
+
 
 class TestIpEnrichment:
     def _wire_tor(self, router):
@@ -316,6 +374,53 @@ class TestIpEnrichment:
                 }
             ],
         )
+
+    def test_engine_coverage_carried_in_envelope(self, wi, router):
+        """#64: explain().coverage lands in coverage.data_coverage; `coverage` stays an object."""
+        router.add('CALL explain', [{**TOR_EXPLAIN, 'coverage': 'ambiguous'}], ioc='185.220.101.1')
+        router.add('CALL explain', [{'available': True, 'found': True}], ioc='AS60729')
+        router.add('RETURN n.isThreat', [TOR_FLAGS])
+        router.add('BELONGS_TO', [])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {'rule_id': '1'}, *make_cfg_args())['whisper']
+        assert w['coverage'] == {'granularity': 'ipv4', 'data_coverage': 'ambiguous'}
+
+    def test_non_string_coverage_omitted_with_note(self, wi, router):
+        router.add('CALL explain', [{**TOR_EXPLAIN, 'coverage': {'sharedHost': True}}], ioc='185.220.101.1')
+        router.add('CALL explain', [{'available': True, 'found': True}], ioc='AS60729')
+        router.add('RETURN n.isThreat', [TOR_FLAGS])
+        router.add('BELONGS_TO', [])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {'rule_id': '1'}, *make_cfg_args())['whisper']
+        assert w['coverage'] == {'granularity': 'ipv4'}
+        assert 'coverage unmapped (dict)' in w['unmapped_summary']
+
+    def test_blank_coverage_omitted_without_note(self, wi, router):
+        router.add('CALL explain', [{**TOR_EXPLAIN, 'coverage': '  '}], ioc='185.220.101.1')
+        router.add('CALL explain', [{'available': True, 'found': True}], ioc='AS60729')
+        router.add('RETURN n.isThreat', [TOR_FLAGS])
+        router.add('BELONGS_TO', [])
+        w = wi.enrich('185.220.101.1', 'ipv4', 'k', {'rule_id': '1'}, *make_cfg_args())['whisper']
+        assert 'data_coverage' not in w['coverage']
+        assert 'coverage unmapped' not in w.get('unmapped_summary', '')
+
+    def test_issue_64_production_row_via_enrich(self, wi, router):
+        """#64: UNKNOWN / no-data / not found, yet allowlist-vouched + isWhitelist → unknown."""
+        row = {
+            'available': True,
+            'found': False,
+            'score': 0,
+            'level': 'UNKNOWN',
+            'sources': [],
+            'advisory': 'allowlist-vouched',
+            'coverage': 'no-data',
+        }
+        router.add('CALL explain', [row], ioc='8.8.4.4')
+        router.add('CALL explain', [{'available': True, 'found': True}], ioc='AS60729')
+        router.add('RETURN n.isThreat', [{'isWhitelist': True}])
+        router.add('BELONGS_TO', [])
+        w = wi.enrich('8.8.4.4', 'ipv4', 'k', {'rule_id': '1'}, *make_cfg_args())['whisper']
+        assert w['verdict'] == 'unknown'
+        assert w['level'] == 'UNKNOWN'
+        assert w['coverage']['data_coverage'] == 'no-data'
 
     def test_envelope_matches_mapping_contract(self, wi, router):
         self._wire_tor(router)

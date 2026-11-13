@@ -5,6 +5,26 @@ All notable changes to whisper-wazuh. The format loosely follows
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-11-13
+
+### Fixed
+
+- The enrichment connector now reads the engine's coverage assessment and carries it in
+  `data.whisper.coverage.data_coverage`. An indicator the engine did not assess no longer counts
+  as `known_good` because of an allowlist or trust signal: it is reported as `unknown` (rule
+  100504) unless a hard-bad flag or threat evidence applies. The default endpoint returns the
+  coverage data. If you point the connector at an endpoint that does not, the connector falls
+  back to its reduced query, which carries no score, level or feed data.
+
+### Documentation
+
+- Added [`docs/wazuh-5.md`](docs/wazuh-5.md), the assessment of the bundle on Wazuh 5.0.0-rc2: it
+  is not compatible yet, because the XML rules, the `<integration>` hook and the 4.x indexer
+  template do not apply. The README status now says so.
+- The same document records a spike of an enrichment path that needs no `<integration>` hook, with
+  the trigger, indexer permissions, mapping and query, and recommends no build before Wazuh 5.0
+  reaches general availability. The shipped bundle is unchanged.
+
 ## [1.2.1] — 2026-10-09
 
 ### Fixed
@@ -108,7 +128,8 @@ interpreter); bring your own Whisper API key.
   [acceptance criteria](docs/mvp-acceptance-criteria.md), and a captured
   [scenario](docs/scenarios/01-tor-ip-enrichment.md).
 
-[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/whisper-sec/whisper-wazuh/compare/v1.0.0...v1.1.0

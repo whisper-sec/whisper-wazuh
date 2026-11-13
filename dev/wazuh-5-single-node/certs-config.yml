@@ -1,0 +1,22 @@
+# Node layout for the Wazuh 5.0.0-rc2 certificate tool (make dev5-certs copies this to config.yml,
+# which the tool rewrites on every run and which is gitignored).
+# Source: step 4 of the single-node deployment guide in the wazuh/wazuh-docker repository at tag
+# v5.0.0-rc2 (docs/ref/getting-started/deployment/single-node.md); 127.0.0.1 is the manager
+# address for a local dev stack.
+nodes:
+  # Wazuh indexer server nodes
+  indexer:
+    - name: wazuh.indexer
+      dns: "wazuh.indexer"
+
+  # Wazuh manager nodes
+  manager:
+    - name: wazuh.manager
+      ip: "127.0.0.1"
+      dns:
+        - "wazuh.manager"
+
+  # Wazuh dashboard node
+  dashboard:
+    - name: wazuh.dashboard
+      dns: "wazuh.dashboard"
