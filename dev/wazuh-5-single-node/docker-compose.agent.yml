@@ -1,0 +1,29 @@
+# Wazuh 5.0.0-rc2 agent overlay (issue #67 spike). Optional; start it with `make dev5-agent-up`,
+# which mints the enrollment token on the manager API and passes it only through the environment
+# of the `docker compose up` it runs. The token never reaches argv or a file in the repo. Docker
+# keeps it in this container's config until the container is removed; it allows one enrolment and
+# expires after 10 minutes.
+#
+# Pre-release image, pinned by the digest it resolved to on 2026-11-12 (multi-arch index,
+# linux/amd64 and linux/arm64). No manager address is set here: the token carries the manager's
+# address and CA (upstream's docs/ref/getting-started/deployment/wazuh-agent.md at v5.0.0-rc2).
+# The stock agent config already tails /var/ossec/logs/active-responses.log (syslog), which is
+# where `make dev5-agent-demo` appends its test line, so no config is mounted.
+services:
+  wazuh.agent:
+    image: wazuh/wazuh-agent:5.0.0-rc2@sha256:f28f472f47b6f18b89549d2ab13a8f0202b10d9300356026547fae1377222774
+    hostname: wazuh.agent
+    container_name: single-node-wazuh.agent
+    restart: "no"
+    depends_on:
+      wazuh.manager:
+        condition: service_healthy
+    environment:
+      # No value on purpose: taken from the caller's environment, never stored in this file.
+      - WAZUH_ENROLLMENT_TOKEN
+      - WAZUH_AGENT_NAME=whisper-spike-agent
+    volumes:
+      - wazuh_agent_etc:/var/ossec/etc
+
+volumes:
+  wazuh_agent_etc:

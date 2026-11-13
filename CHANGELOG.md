@@ -20,12 +20,23 @@ All notable changes to whisper-wazuh. The format loosely follows
 - Added [`docs/wazuh-5.md`](docs/wazuh-5.md): the assessment of the bundle on Wazuh 5.0.0-rc2 (not
   compatible; the XML rules, the `<integration>` hook and the 4.x indexer template do not apply)
   and the README status now says so.
+- `docs/wazuh-5.md` records a spike of option (b), an enrichment path with no `<integration>`
+  hook: on rc2 an enrolled agent produced a finding with a public IP, and a poller on the indexer
+  API stored its Whisper enrichment in its own index. The doc gives the trigger, the indexer
+  permissions, the mapping and the query, recommends no build before the GA re-run, and replaces
+  the "not yet decided" recommendation with the decision tracked on issue 65. The shipped bundle
+  is unchanged.
 
 ### Development
 
 - `make dev5-*` targets and `dev/wazuh-5-single-node/`: a separate, pinned Wazuh 5.0.0-rc2 dev
   stack used for that assessment. Its certificates come from Wazuh's cert tool, run in a
   throwaway container after a pinned SHA-256 check.
+- Spike overlays for that stack: an enrolled `wazuh/wazuh-agent:5.0.0-rc2` (pinned by digest) and a
+  finding enricher (`dev/wazuh-5-spike/`, stdlib-only, loads the connector read-only), with
+  `make dev5-agent-up`, `dev5-agent-down`, `dev5-agent-demo`, `dev5-spike-setup`, `dev5-spike-up`
+  and `dev5-spike-query`. The enrollment token is minted at run time, allows one enrolment and is
+  never written to the repo. `dev5-down` and `dev5-reset` stop the new services too. Ruff now also covers `dev/wazuh-5-spike/`.
 
 ## [1.2.1] — 2026-10-09
 

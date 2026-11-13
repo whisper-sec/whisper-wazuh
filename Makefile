@@ -15,7 +15,8 @@ COMPOSE_AGENT := $(COMPOSE) -f $(STACK_DIR)/docker-compose.agent.yml
         dev-agent-up dev-agent-down dev-agent-logs dev-agent-demo \
         dev-whisper-install dev-whisper-uninstall dev-whisper-smoke dev-demo-enrich dev-acceptance \
         dev-logs-install dev-logs-smoke \
-        dev5-certs dev5-up dev5-down dev5-reset dev5-ps dev5-whisper-install
+        dev5-certs dev5-up dev5-down dev5-reset dev5-ps dev5-whisper-install \
+        dev5-agent-up dev5-agent-down dev5-agent-demo dev5-spike-setup dev5-spike-up dev5-spike-query
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -142,6 +143,10 @@ dev-logs-smoke: ## Run the log-source poller once and show the spool + decoded a
 # host ports with the 4.14.5 stack: run `make dev-down` first, never both at once.
 STACK5_DIR     := dev/wazuh-5-single-node
 COMPOSE5       := docker compose -f $(STACK5_DIR)/docker-compose.yml
+# The spike overlays (issue #67): an enrolled agent and the finding enricher. Every overlay is
+# listed for down/reset so those services stop with the stack.
+COMPOSE5_AGENT := $(COMPOSE5) -f $(STACK5_DIR)/docker-compose.agent.yml
+COMPOSE5_SPIKE := $(COMPOSE5_AGENT) -f $(STACK5_DIR)/docker-compose.spike.yml
 WHISPER_SRC5   := /tmp/whisper-src
 # Pre-release cert tool (Wazuh staging host). The SHA-256 is pinned beside the URL and checked
 # before anything runs; a new rc or GA needs a new, reviewed pin.
@@ -166,11 +171,11 @@ dev5-certs: ## 5.0 rc2: fetch the SHA-pinned cert tool, issue certs and credenti
 dev5-up: ## 5.0 rc2: start the stack (stop the 4.14.5 stack first)
 	$(COMPOSE5) up -d
 
-dev5-down: ## 5.0 rc2: stop the stack (keep data volumes)
-	$(COMPOSE5) down
+dev5-down: ## 5.0 rc2: stop the stack, agent and enricher included (keep data volumes)
+	$(COMPOSE5_SPIKE) --profile setup down
 
-dev5-reset: ## 5.0 rc2: stop the stack and delete its data volumes
-	$(COMPOSE5) down -v
+dev5-reset: ## 5.0 rc2: stop the stack, agent and enricher included, and delete their data volumes
+	$(COMPOSE5_SPIKE) --profile setup down -v
 
 dev5-ps: ## 5.0 rc2: show stack status
 	$(COMPOSE5) ps
@@ -179,3 +184,53 @@ dev5-whisper-install: ## 5.0 rc2: run the unchanged install.sh against the manag
 	$(COMPOSE5) exec -T wazuh.manager mkdir -p $(WHISPER_SRC5)
 	docker cp integrations/whisper/. $$($(COMPOSE5) ps -q wazuh.manager):$(WHISPER_SRC5)/
 	$(COMPOSE5) exec -T wazuh.manager sh $(WHISPER_SRC5)/install.sh --dev --group sshd
+
+# --- Wazuh 5.0 option (b) spike (issue #67; docs/wazuh-5.md, dev/README.md) ---------------
+# An rc2 agent produces a finding, and a poller on the indexer API enriches it without the
+# <integration> hook. Dev-only: nothing here ships. The enrollment token is a credential: it is
+# minted on the manager API and passed to `docker compose up` through the environment of that one
+# recipe shell, never echoed, put on a command line or written to the repo (Docker keeps it in the
+# agent container's config until dev5-agent-down; it is single-use and expires after 600 s, and the
+# API takes that lifetime as a string, not a number). The API credential goes
+# to curl through its stdin config (-K -), never argv. The manager's remoted certificate names
+# 127.0.0.1 and wazuh.manager, so the token is minted for the latter (the compose network name).
+S5_CA          := $(STACK5_DIR)/config/root-ca/certs/root-ca.pem
+S5_CREDS       := $(STACK5_DIR)/config/credentials
+S5_API         := https://wazuh.manager:55000
+S5_CURL        := curl -sS --resolve wazuh.manager:55000:127.0.0.1 --cacert $(S5_CA)
+
+dev5-agent-up: ## 5.0 rc2: mint an enrollment token on the manager API and start the enrolled agent
+	@set -e; \
+	pw=$$(grep '^WAZUH_MANAGER_API_PASSWORD=' $(S5_CREDS)/manager.env | cut -d= -f2-); \
+	pwq=$$(printf '%s' "$$pw" | sed -e 's/[\\"]/\\&/g'); \
+	jwt=$$(printf 'user = "wazuh:%s"\n' "$$pwq" | $(S5_CURL) -K - -X POST "$(S5_API)/security/user/authenticate?raw=true"); \
+	resp=$$(printf 'header = "Authorization: Bearer %s"\n' "$$jwt" | $(S5_CURL) -K - -X POST $(S5_API)/agents/enrollment-tokens \
+		-H 'Content-Type: application/json' -d '{"address": "wazuh.manager", "embed_ca": true, "max_uses": 1, "ttl": "600s"}'); \
+	tok=$$(printf '%s' "$$resp" | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p'); \
+	if test -z "$$tok"; then echo "dev5-agent-up: no enrollment token minted (response not shown: it may hold a credential)"; exit 1; fi; \
+	WAZUH_ENROLLMENT_TOKEN="$$tok" $(COMPOSE5_AGENT) up -d wazuh.agent; \
+	echo "agent started; the enrollment token went through the environment only"
+
+dev5-agent-down: ## 5.0 rc2: remove the agent container (its identity volume stays; dev5-reset deletes it)
+	$(COMPOSE5_AGENT) rm -sf wazuh.agent
+
+IOC ?= 185.220.101.1
+# A lone "Failed password" line is only an event on rc2; no stock rule turns it into a finding. The
+# stock rule "SSH connection closed before authentication" fires on a pre-auth close that names a peer.
+dev5-agent-demo: ## 5.0 rc2: append an sshd pre-auth close line for IOC (default 185.220.101.1) to the agent's tailed log
+	@printf '%s' '$(IOC)' | grep -Eq '^[0-9A-Fa-f.:]+$$' || { echo 'IOC must be an IP address'; exit 1; }
+	@$(COMPOSE5_AGENT) exec -T wazuh.agent sh -c \
+		'echo "$$(date "+%b %e %H:%M:%S") whisper-spike-agent sshd[1235]: Connection closed by invalid user admin $(IOC) port 4444 [preauth]" >> /var/ossec/logs/active-responses.log'
+	@echo "Appended an sshd pre-auth close from $(IOC). The finding reaches wazuh-findings-v5-* after the detector runs (about 2 minutes)."
+
+dev5-spike-setup: ## 5.0 rc2 spike: create the enrichment template, index, least-privilege role and user (admin credential)
+	mkdir -p $(STACK5_DIR)/config/whisper-enricher
+	$(COMPOSE5_SPIKE) run --rm whisper.enricher-setup
+
+dev5-spike-up: ## 5.0 rc2 spike: start the finding enricher (polls wazuh-findings-v5-*, no <integration> hook)
+	$(COMPOSE5_SPIKE) up -d whisper.enricher
+
+FINDING ?=
+dev5-spike-query: ## 5.0 rc2 spike: print the enrichment stored for a finding (make dev5-spike-query FINDING=<_id>)
+	@test -n "$(FINDING)" || { echo "usage: make dev5-spike-query FINDING=<finding _id>"; exit 2; }
+	@$(COMPOSE5_SPIKE) run --rm --no-deps whisper.enricher query "$(FINDING)"
